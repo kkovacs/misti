@@ -23,7 +23,7 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 ## Architecture & rationale
 
 - `server.ts` is a stateless proxy. The **browser holds all conversation state**
-  (doc text + history) and resends it every turn; the only server state is the
+  (doc text, images, history) and resends it every turn; the only server state is the
   in-memory cost counter. Reload / "New chat" = fresh conversation.
 - Documents are "dumped", not chunked: extracted text is attached **once**, to
   the user turn after upload, so it becomes a stable prefix (Mistral prompt
@@ -37,8 +37,9 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   `[text, image_url...]` parts; turns without images stay plain strings.
   Images are re-sent (and billed) every turn, hence the shrink and the
   per-conversation image cap.
-- `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` are
-  deliberate tiny helpers (no dependency), CommonJS-exported for bun tests.
+- `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` /
+  `money.js` are deliberate tiny helpers (no dependency), CommonJS-exported for
+  bun tests.
 - Server -> browser is NDJSON (`delta` / `reset` / `done` / `error`). The
   localhost hop always streams; the streaming toggle only affects the
   server -> Mistral call.
@@ -75,13 +76,20 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 - **Prompt caching** (verified on `mistral-large-4`, differs from the docs):
   automatic, but prompts under ~1k tokens never cache, with or without a key
   (docs claim 64). Cached counts step in ~512-token blocks, so the last few
-  hundred tokens are always uncached; the first turn always shows 0. The
+  hundred tokens are always uncached; the first turn always shows 0. Observed
+  lifetime ~3-5 min (hit at 3 min, gone at 5), and hits are not guaranteed
+  even inside it — a follow-up after a long read shows 0 cached. Keep-alive
+  pings were rejected (each costs 10% of the whole prefix, also while idle). The
   browser sends a random per-chat `prompt_cache_key` (new on "New chat") —
   Mistral's documented hit-rate lever; never put user data in it.
 - No pricing in any API response (`/v1/pricing`, `/v1/prices` -> 404). Prices
   come from models.dev (`mistral.models[<model>].cost`) at startup, falling
   back to constants in `server.ts`. Cost = uncached input + cached input at
   `cache_read` + output.
+- Money is **displayed in HUF**: models.dev prices are USD, so the rate is
+  USD->HUF regardless of the invoice currency (EUR). ECB rate via
+  frankfurter.dev at startup; a hardwired, dated rate if unreachable (`XXX`
+  refresh it). USD, rate, date and source live in the tooltip.
 - `usage` arrives only in the final SSE chunk: a truncated stream that gets
   retried is billed but not counted. Accepted; the counter is an estimate.
 
@@ -109,7 +117,8 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 **Testing**
 - Server tests spawn the real `server.ts` against a mock Mistral with
   `--no-env-file` and `MISTI_PORT` — without `--no-env-file`, Bun auto-loads
-  the real `.env` key. `MISTI_PORT` is test-only.
+  the real `.env` key. `MISTI_PORT` is test-only. A dead `HTTPS_PROXY` keeps
+  them offline (models.dev/FX hit their fallbacks; the http mock is unaffected).
 - PDF fixtures: long single lines run off the page and get clipped by pdf.js;
   use many short lines.
 - `test/fixtures.ts` uses `jszip` (mammoth's transitive dep, marked `XXX`).
@@ -142,3 +151,4 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 - https://docs.mistral.ai/studio/conversations/advanced/prompt-caching —
   prompt caching (`prompt_cache_key`, 10% price for cached tokens).
 - https://models.dev/api.json — price source.
+- https://frankfurter.dev — ECB reference rates (`/v1/latest?from=USD&to=HUF`).

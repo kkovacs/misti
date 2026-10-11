@@ -51,6 +51,7 @@ header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; pad
 /* Conversation */
 main { flex: 1; overflow-y: auto; padding-block: 24px; display: flex; flex-direction: column; gap: 18px; }
 .hint { margin: auto; text-align: center; color: var(--muted); max-width: 30rem; }
+.hint:not(:only-child) { display: none; } /* empty state only */
 .hint h2 { color: var(--text); font-size: 20px; margin: 0 0 6px; }
 .msg { overflow-wrap: anywhere; }
 .msg.user { align-self: flex-end; max-width: 85%; background: var(--user); padding: 10px 14px; border-radius: 16px 16px 4px 16px; }
@@ -59,6 +60,7 @@ main { flex: 1; overflow-y: auto; padding-block: 24px; display: flex; flex-direc
 .msg.error, .msg .error { color: var(--bad); }
 .meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .meta button { padding: 1px 10px; font-size: 12px; }
+.meta span + span::before { content: "· "; }
 
 /* Document chips; data-kind becomes a small badge */
 .chips, #docs { display: flex; flex-wrap: wrap; gap: 6px; }

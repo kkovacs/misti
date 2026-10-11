@@ -71,6 +71,9 @@ beforeAll(async () => {
       STREAM_IDLE_TIMEOUT_MS: "500",
       REQUEST_TIMEOUT_MS: "2000",
       MAX_DOC_CHARS: "1000",
+      // Dead proxy for https only: models.dev + FX lookups fail -> deterministic fallbacks,
+      // no network in tests. The mock upstream is plain http, so it is unaffected.
+      HTTPS_PROXY: "http://127.0.0.1:9",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -108,7 +111,7 @@ const textOf = (evs: Ev[]) => evs.filter((e) => e.type === "delta").map((e) => e
 describe("static + guard", () => {
   test("serves UI files, nothing else", async () => {
     expect(await (await fetch(`${S}/`)).text()).toContain("MISTI");
-    expect((await fetch(`${S}/md.js`)).status).toBe(200);
+    for (const f of ["md.js", "img.js", "money.js", "app.js", "style.css"]) expect((await fetch(`${S}/${f}`)).status).toBe(200);
     expect((await fetch(`${S}/server.ts`)).status).toBe(404);
   });
 
@@ -148,6 +151,7 @@ describe("api", () => {
     const done = evs.at(-1)!;
     expect(done).toMatchObject({ type: "done", finishReason: "stop", usage });
     expect(done.costUsd).toBeGreaterThan(0);
+    expect(done.fx).toMatchObject({ usdHuf: expect.any(Number), date: expect.stringMatching(/^\d{4}-\d\d-\d\d$/), source: "hardwired" });
     const last = seen.at(-1)!;
     expect(last.auth).toBe(`Bearer ${KEY}`);
     expect(last.body.messages[0].role).toBe("system");
@@ -230,6 +234,8 @@ describe("api", () => {
     expect(u.cachedTokens).toBe(280);
     const one = (60 * u.prices.input + 40 * u.prices.cache_read + 50 * u.prices.output) / 1e6;
     expect(u.usd).toBeCloseTo(7 * one, 10);
+    expect(u.priceSource).toBe("fallback constants");
+    expect(u.fx.source).toBe("hardwired");
   });
 });
 
@@ -276,7 +282,7 @@ describe("images", () => {
 describe("logging (runs last)", () => {
   test("rich forensics, but no key, doc text, prompts, filenames or bodies", async () => {
     await Bun.sleep(100); // let stdout drain
-    for (const ev of ["[startup] misti", "mistral.headers", "mistral.stream_end", "chat.fallback", "mistral.http_error", "http.rejected"]) {
+    for (const ev of ["[startup] misti", "prices.fallback", "fx.fallback", "mistral.headers", "mistral.stream_end", "chat.fallback", "mistral.http_error", "http.rejected"]) {
       expect(logs).toContain(ev);
     }
     expect(logs).not.toContain(KEY);

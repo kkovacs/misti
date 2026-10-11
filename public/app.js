@@ -21,7 +21,12 @@ const add = (node) => {
   return node;
 };
 const note = (text, cls = "system") => add(el("div", `msg ${cls}`, text));
-const usd = (n) => `$${n.toFixed(4)}`;
+// Money is shown in HUF (Hungarian format); USD and the rate go in the tooltip.
+function money(node, usdAmount, fx) {
+  node.textContent = formatHuf(usdAmount * fx.usdHuf);
+  node.title = `$${usdAmount.toFixed(4)} · 1 USD = ${fx.usdHuf} HUF (${fx.date}, ${fx.source})`;
+  return node;
+}
 
 // --- attachments (documents + images) ------------------------------------------------------
 
@@ -196,10 +201,11 @@ async function send(question) {
   };
   const u = done.usage;
   const info = u
-    ? `${u.prompt_tokens.toLocaleString()} in (${(u.prompt_tokens_details?.cached_tokens ?? 0).toLocaleString()} cached) / ${u.completion_tokens.toLocaleString()} out · ${usd(done.costUsd)}`
+    ? `${u.prompt_tokens.toLocaleString()} in (${(u.prompt_tokens_details?.cached_tokens ?? 0).toLocaleString()} cached) / ${u.completion_tokens.toLocaleString()} out`
     : "no usage reported";
-  ui.meta.replaceChildren(copy, el("span", null, info + (done.finishReason && done.finishReason !== "stop" ? ` · finish: ${done.finishReason}` : "")));
-  $("#cost").textContent = usd(done.totalUsd);
+  const finish = done.finishReason && done.finishReason !== "stop" ? `finish: ${done.finishReason}` : null;
+  ui.meta.replaceChildren(copy, el("span", null, info), ...(u ? [money(el("span"), done.costUsd, done.fx)] : []), ...(finish ? [el("span", null, finish)] : []));
+  money($("#cost"), done.totalUsd, done.fx);
 }
 
 function setBusy(on) {
@@ -296,4 +302,4 @@ $("#health").onclick = async () => {
 // Cost counter survives a page reload (server-side, in-memory).
 fetch("/api/usage")
   .then((r) => r.json())
-  .then((u) => ($("#cost").textContent = usd(u.usd)));
+  .then((u) => money($("#cost"), u.usd, u.fx));

@@ -270,6 +270,23 @@ const prices = { input: 0.68, output: 2.09, cache_read: 0.07 };
 let priceSource = "fallback constants";
 const totals = { calls: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, usd: 0 };
 
+// USD->HUF for display: prices are USD (models.dev), whatever the invoice currency.
+// ECB reference rate via Frankfurter (no key). If unreachable, a hardwired rate.
+// XXX refresh the hardwired rate (and its date) now and then.
+const fx = { usdHuf: 325.79, date: "2026-10-09", source: "hardwired" };
+
+async function loadFx() {
+  try {
+    const res = await fetch("https://api.frankfurter.dev/v1/latest?from=USD&to=HUF", { signal: AbortSignal.timeout(5000) });
+    const d: any = await res.json();
+    if (typeof d?.rates?.HUF !== "number") throw new Error(`unexpected response (HTTP ${res.status})`);
+    Object.assign(fx, { usdHuf: d.rates.HUF, date: d.date, source: "ECB via frankfurter.dev" });
+  } catch (err) {
+    log("startup", "fx.fallback", errInfo(err));
+  }
+  log("startup", "fx", fx);
+}
+
 async function loadPrices() {
   const id = "startup";
   try {
@@ -347,7 +364,7 @@ async function handleChat(id: string, req: Request): Promise<Response> {
         }
         const cost = out.usage ? addUsage(out.usage) : 0;
         if (!out.usage) log(id, "chat.no_usage");
-        send({ type: "done", finishReason: out.finishReason, usage: out.usage, costUsd: cost, totalUsd: totals.usd });
+        send({ type: "done", finishReason: out.finishReason, usage: out.usage, costUsd: cost, totalUsd: totals.usd, fx });
         log(id, "chat.ok", { ms: Math.round(performance.now() - t0), costUsd: cost, totalUsd: totals.usd });
       } catch (err) {
         const e = err instanceof ChatError ? err : new ChatError("network", String((err as any)?.message ?? err));
@@ -412,7 +429,7 @@ async function handleHealth(id: string): Promise<Response> {
 
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((h) => `http://${h}`));
-const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js", "/img.js": "img.js" };
+const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js", "/img.js": "img.js", "/money.js": "money.js" };
 
 async function route(id: string, req: Request, path: string): Promise<Response> {
   // Drive-by protection: DNS rebinding (Host) and cross-site POSTs (Origin; curl sends none).
@@ -427,7 +444,7 @@ async function route(id: string, req: Request, path: string): Promise<Response> 
   if (req.method === "POST" && path === "/api/chat") return handleChat(id, req);
   if (req.method === "POST" && path === "/api/extract") return handleExtract(id, req);
   if (req.method === "GET" && path === "/api/health") return handleHealth(id);
-  if (req.method === "GET" && path === "/api/usage") return json({ ...totals, prices, priceSource });
+  if (req.method === "GET" && path === "/api/usage") return json({ ...totals, prices, priceSource, fx });
   return new Response("not found", { status: 404 });
 }
 
@@ -462,3 +479,4 @@ log("startup", "misti", {
   streamIdleTimeoutMs: STREAM_IDLE_TIMEOUT_MS, requestTimeoutMs: REQUEST_TIMEOUT_MS, maxDocChars: MAX_DOC_CHARS,
 });
 loadPrices();
+loadFx();
