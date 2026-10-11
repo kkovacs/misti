@@ -11,8 +11,8 @@ Zero Data Retention (ZDR) compliance requirement.
 - **ZDR**: only stateless Mistral endpoints. Never `/v1/files` or any stateful
   API (agents, batch, conversations, libraries). Documents are never
   "uploaded"; only extracted text is sent in a stateless request body.
-- **Endpoint**: `https://api.eu.mistral.ai` (code constant)
-- **Model**: `mistral-large-4` (code constant; confirmed present via
+- **Endpoint**: `https://api.eu.mistral.ai` (code constant fallback if not in .env)
+- **Model**: `mistral-large-4` (code constant if not in .env; confirmed present via
   `GET /v1/models`)
 - **Bind**: `127.0.0.1:31571`, single user, no auth
 - **Runtime**: plain source directory — ship source only, no bundled
@@ -47,14 +47,14 @@ fully local.**
 
 ## Config (.env)
 
-- `.env` contains **only `MISTRAL_API_KEY`**. Nothing else.
-- Model, base URL, and port are code constants (change in code, not in `.env`).
+- `.env` contains **only `MISTRAL_API_KEY`**, everything else is optional.
 - **No proxy configuration in V1.**
 
 ## Architecture
 
 ```
 misti/
+├─ work/            Workspace area for files.
 ├─ server.ts        Bun.serve — static public/ + POST /api/chat + GET /api/health + GET /api/usage
 ├─ extract.ts       [done] docx/pdf -> text; "no text layer" guard
 ├─ mistral-openapi.yaml  Mistral API reference (source-noted in header)
@@ -68,10 +68,10 @@ misti/
 
 ## Document handling
 
-- **Approach: Option A (dump, no tools).** Attach docx/pdf -> extract once ->
-  hold text client-side as named documents -> dump full text into each turn.
-  Re-asking does not re-extract or re-upload. No tool-calling, no local
-  workspace, no markdown files (deferred to V2 as a tool-based corpus agent).
+- **Approach: Option A (dump, no tools).** Attach docx/pdf -> extract ->
+  dump full text into each turn.
+  No local workspace, no markdown files (deferred to V2 as a tool-based corpus agent).
+- **One tool** in V1: ability to write `.md` and `.html` files into `work/`.
 - **docx** -> `mammoth` (strict zip parser; corrupt files fail fast — accepted)
 - **PDF** -> `unpdf` (pdf.js text layer)
 - **Scanned PDF** (no text layer) -> clear error: "scanned, not supported in V1"
@@ -79,7 +79,7 @@ misti/
   `MAX_DOC_CHARS` guard (default ~400k) with a fail-fast "too large" error.
   (`mistral-large-4` has a 1M-token context, so this guard is cost control,
   not a context limit.)
-- **Copy to clipboard** button on every assistant response. No export-to-file.
+- **Copy to clipboard** button on every assistant response.
 - pdf.js `TT: undefined function` warning silenced in the server.
 
 ## Dependencies
@@ -88,36 +88,15 @@ misti/
 - `unpdf` — PDF text layer
 - `@types/bun` — dev types
 
-## API
-
-```
-POST /api/chat    multipart: message + optional docx/pdf files + stream flag
-                  -> extract text -> chat.completions -> SSE tokens to client
-                     (or JSON when stream=false). Requests
-                     stream_options.include_usage=true so token usage arrives
-                     even on the streaming path.
-GET  /api/health  cheap stateless ping (models list), short timeout;
-                  wired to a "Test connection" button.
-GET  /api/usage   in-memory totals (tokens + estimated cost) since server
-                  start; drives the "cost today" counter.
-```
-
 ## Cost tracking
 
 - No pricing in the inference responses (model metadata + chat responses
-  carry `usage` tokens only — no currency). Model price is the hardcoded
-  constants below (sourced from models.dev).
+  carry `usage` tokens only — no currency). Model price sourced from models.dev on start.
 - Cost is computed locally: `usage` tokens x hardcoded price constants.
 - **Cache-aware**: Mistral reports `usage.prompt_tokens_details.cached_tokens`;
-  cached input is billed at the reduced cache-read rate. Three constants:
-  `INPUT_PRICE_PER_1M`, `CACHED_INPUT_PRICE_PER_1M`, `OUTPUT_PRICE_PER_1M`.
+  cached input is billed at the reduced cache-read rate.
   cost = (uncached_prompt x input + cached x cached-input + completion x output) / 1M
-- **Prices** (USD per 1M tokens, from models.dev, public list):
-  - input `0.68`, output `2.09`, cache-read `0.07` for `mistral-large-4`.
-  - Constants editable at the top of server.ts. Note: `billing_model_name` is
-    `mistral-large-4-0-launch-discount`, so the org's actual plan price may
-    differ from public list.
-- Counter is **in-memory only** ("today" = since server start; resets on
+- Counter is **in-memory only** (since server start; resets on
   restart/reload). No persistence — consistent with stateless V1.
 
 ## Streaming & resilience (corporate-hostile network)
@@ -139,19 +118,18 @@ GET  /api/usage   in-memory totals (tokens + estimated cost) since server
 - **Distinct errors**: network/proxy ("check VPN/proxy") vs. Mistral API error
   vs. document too large.
 - Health button lets the user re-test connectivity after a VPN change without
-  burning a full document request.
+  burning a full document request (call the "model list" endpoint).
 
 ## V1 non-goals
 
 - No chunking/RAG, no embeddings
 - No history persistence (stateless; reload = fresh)
-- No tool-calling / local agent workspace (V2)
 - No export-to-file (copy-to-clipboard per response instead)
 - No cost persistence (in-memory counter only)
-- No auth
+- No auth, but listen on localhost
 - No scanned-PDF support (error only)
 - No corrupt-file recovery (fail fast only)
-- No proxy configuration, no Windows-registry proxy auto-read
+- No proxy configuration, no Windows-registry proxy auto-read, hope bun handles proxy for us
 
 ## Verified so far
 
@@ -165,14 +143,3 @@ GET  /api/usage   in-memory totals (tokens + estimated cost) since server
 - No cost/pricing field in any response: `/v1/pricing` + `/v1/prices` -> 404;
   chat completion returns `usage` only (`prompt_tokens`, `completion_tokens`,
   `prompt_tokens_details.cached_tokens`, `service_tier`).
-
-## Open items
-
-- Confirm `mistral-large-4` is ZDR-enabled on the org's plan (a successful call
-  does not prove ZDR coverage).
-- Confirm org plan pricing matches models.dev public prices (input 0.68 /
-  output 2.09 / cache-read 0.07 $/1M); `billing_model_name` showed a launch
-  discount, so actual cost may be lower.
-- Scanned-PDF share unknown; handled as an error for V1, revisit if scans show up.
-- Proxy/VPN: deferred. If the box needs an explicit proxy, revisit — Bun honors
-  `HTTPS_PROXY` but does not read the Windows system proxy (registry).
