@@ -22,14 +22,26 @@ const add = (node) => {
 const note = (text, cls = "system") => add(el("div", `msg ${cls}`, text));
 const usd = (n) => `$${n.toFixed(4)}`;
 
-// --- documents -----------------------------------------------------------------------------
+// --- attachments (documents + images) ------------------------------------------------------
+
+// Chip for an attachment: images get a thumbnail, documents a PDF/DOCX badge.
+function chipFor(d, label) {
+  const chip = el("span", "chip", label);
+  if (d.kind === "image") {
+    const img = el("img");
+    img.src = d.url;
+    img.alt = "";
+    chip.prepend(img);
+  } else if (d.kind) chip.dataset.kind = d.kind;
+  return chip;
+}
 
 function renderPending() {
   const box = $("#docs");
   box.replaceChildren(
     ...pending.map((d, i) => {
-      const chip = el("span", "chip", `${d.name} · ${d.chars.toLocaleString()} chars${d.pages ? ` · ${d.pages} p` : ""}`);
-      if (d.kind) chip.dataset.kind = d.kind;
+      const info = d.kind === "image" ? `${d.w}x${d.h}` : `${d.chars.toLocaleString()} chars${d.pages ? ` · ${d.pages} p` : ""}`;
+      const chip = chipFor(d, `${d.name} · ${info}`);
       const x = el("button", null, "x");
       x.type = "button";
       x.title = "Remove";
@@ -45,6 +57,16 @@ function renderPending() {
 
 async function upload(files) {
   for (const file of files) {
+    // Images never touch the server's extractor: shrink in the browser, send inline later.
+    if (file.type.startsWith("image/")) {
+      try {
+        pending.push({ kind: "image", name: file.name, ...(await shrinkImage(file)) });
+        renderPending();
+      } catch (err) {
+        note(`${file.name}: cannot read image (${err.message})`, "error");
+      }
+      continue;
+    }
     const fd = new FormData();
     fd.append("file", file);
     const status = note(`Extracting ${file.name}...`);
@@ -65,16 +87,21 @@ async function upload(files) {
 // Docs go into the user turn once; later turns resend them as part of history (cache-friendly prefix).
 const docBlock = (d) => `<document name="${d.name.replace(/"/g, "'")}">\n${d.text}\n</document>\n\n`;
 
+// Plain string without images (as before); with images, text + image_url parts.
+function userContent(question, items) {
+  const text = items.filter((d) => d.kind !== "image").map(docBlock).join("") + question;
+  const images = items.filter((d) => d.kind === "image");
+  if (!images.length) return text;
+  return [{ type: "text", text }, ...images.map((d) => ({ type: "image_url", image_url: d.url }))];
+}
+
 // --- chat ----------------------------------------------------------------------------------
 
 function userBubble(question, docs) {
   const b = el("div", "msg user");
   if (docs.length) {
     const chips = el("div", "chips");
-    for (const d of docs) {
-      const chip = chips.appendChild(el("span", "chip", d.name));
-      if (d.kind) chip.dataset.kind = d.kind;
-    }
+    for (const d of docs) chips.append(chipFor(d, d.name));
     b.append(chips);
   }
   b.append(el("div", "text", question));
@@ -91,8 +118,7 @@ function assistantBubble() {
 
 async function send(question) {
   const docs = pending;
-  const content = docs.map(docBlock).join("") + question;
-  history.push({ role: "user", content });
+  history.push({ role: "user", content: userContent(question, docs) });
   pending = [];
   renderPending();
   userBubble(question, docs);
@@ -226,6 +252,14 @@ $("#file").onchange = (e) => {
   upload([...e.target.files]);
   e.target.value = "";
 };
+
+// Paste images (e.g. screenshots) from the clipboard; plain text pastes normally.
+document.addEventListener("paste", (e) => {
+  const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+  if (!files.length || busy) return;
+  e.preventDefault();
+  upload(files);
+});
 
 // Drag & drop anywhere on the page.
 document.addEventListener("dragover", (e) => {

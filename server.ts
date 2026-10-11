@@ -12,6 +12,7 @@ const KEY = process.env.MISTRAL_API_KEY;
 const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 60_000);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 300_000);
 const MAX_DOC_CHARS = Number(process.env.MAX_DOC_CHARS ?? 400_000);
+const MAX_IMAGES = 16; // per conversation: every image is re-sent (and billed) on every turn
 const HEALTH_TIMEOUT_MS = 15_000;
 
 const SYSTEM_PROMPT =
@@ -118,7 +119,31 @@ async function mistralFetch(id: string, path: string, init: RequestInit): Promis
 
 type Usage = { prompt_tokens: number; completion_tokens: number; prompt_tokens_details?: { cached_tokens?: number } };
 type Outcome = { content: string; finishReason?: string; usage?: Usage };
-type Msg = { role: "user" | "assistant"; content: string };
+// User turns may carry images: content becomes text + image_url parts (inline data: URLs only).
+type Part = { type: "text"; text: string } | { type: "image_url"; image_url: string };
+type Msg = { role: "user" | "assistant"; content: string | Part[] };
+
+// Only inline images: a remote URL would make Mistral fetch it from a third party.
+const okPart = (p: any) =>
+  (p?.type === "text" && typeof p.text === "string") ||
+  (p?.type === "image_url" && typeof p.image_url === "string" && p.image_url.startsWith("data:image/"));
+const okMsg = (m: any) =>
+  (m?.role === "user" || m?.role === "assistant") &&
+  (typeof m.content === "string" || (m.role === "user" && Array.isArray(m.content) && m.content.length > 0 && m.content.every(okPart)));
+
+// Sizes for guards and logs; never the content itself.
+function measure(messages: Msg[]) {
+  let chars = 0, images = 0, imageBytes = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") chars += m.content.length;
+    else
+      for (const p of m.content) {
+        if (p.type === "text") chars += p.text.length;
+        else (images++, (imageBytes += p.image_url.length));
+      }
+  }
+  return { chars, images, imageBytes };
+}
 
 // Message content is a string, or (reasoning models) an array of typed chunks; keep only text.
 function textOf(content: unknown): string {
@@ -138,8 +163,7 @@ async function chatAttempt(id: string, messages: Msg[], stream: boolean, outer: 
     if (stream) timer = setTimeout(() => idle.abort(new ChatError("idle", `no bytes for ${STREAM_IDLE_TIMEOUT_MS} ms`)), STREAM_IDLE_TIMEOUT_MS);
   };
 
-  const chars = messages.reduce((n, m) => n + m.content.length, 0);
-  log(id, "mistral.start", { model: MODEL, stream, messages: messages.length, chars });
+  log(id, "mistral.start", { model: MODEL, stream, messages: messages.length, ...measure(messages) });
   const t0 = performance.now();
   arm();
   try {
@@ -271,14 +295,18 @@ const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 async function handleChat(id: string, req: Request): Promise<Response> {
   const { messages, stream } = (await req.json()) as { messages: Msg[]; stream: boolean };
-  if (!Array.isArray(messages) || !messages.length || messages.some((m) => !["user", "assistant"].includes(m.role) || typeof m.content !== "string")) {
-    return json({ kind: "bad_request", message: "messages must be [{role: user|assistant, content: string}]" }, 400);
+  if (!Array.isArray(messages) || !messages.length || !messages.every(okMsg)) {
+    return json({ kind: "bad_request", message: "messages must be [{role, content: string | user parts [text, image_url (data:image/...)]}]" }, 400);
   }
-  // Guard covers the whole conversation (docs + history), since all of it is billed each turn.
-  const chars = messages.reduce((n, m) => n + m.content.length, 0);
+  // Guards cover the whole conversation (docs + images + history), since all of it is billed each turn.
+  const { chars, images } = measure(messages);
   if (chars > MAX_DOC_CHARS) {
     log(id, "chat.too_large", { chars, max: MAX_DOC_CHARS });
     return json({ kind: "too_large", message: `conversation is ${chars} chars, limit is ${MAX_DOC_CHARS} (MAX_DOC_CHARS)` }, 413);
+  }
+  if (images > MAX_IMAGES) {
+    log(id, "chat.too_many_images", { images, max: MAX_IMAGES });
+    return json({ kind: "too_large", message: `conversation has ${images} images, limit is ${MAX_IMAGES} — start a new chat` }, 413);
   }
 
   // One controller for the hard deadline and browser disconnects; reasons are ChatErrors.
@@ -374,7 +402,7 @@ async function handleHealth(id: string): Promise<Response> {
 
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((h) => `http://${h}`));
-const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js" };
+const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js", "/img.js": "img.js" };
 
 async function route(id: string, req: Request, path: string): Promise<Response> {
   // Drive-by protection: DNS rebinding (Host) and cross-site POSTs (Origin; curl sends none).

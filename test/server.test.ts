@@ -24,7 +24,8 @@ const mock = Bun.serve({
     if (path === "/v1/models") return Response.json({ data: [{ id: "mistral-large-4" }] });
     const body: any = await req.json();
     seen.push({ auth: req.headers.get("authorization"), body });
-    const q: string = body.messages.at(-1).content;
+    const last = body.messages.at(-1).content;
+    const q: string = typeof last === "string" ? last : (last.find((p: any) => p.type === "text")?.text ?? "");
 
     if (q.includes("ERR401")) return Response.json({ message: "Unauthorized" }, { status: 401 });
     if (q.includes("HTML")) return new Response("<html>blocked by proxy</html>", { status: 502, headers: { "content-type": "text/html" } });
@@ -214,6 +215,46 @@ describe("api", () => {
     expect(u.cachedTokens).toBe(200);
     const one = (60 * u.prices.input + 40 * u.prices.cache_read + 50 * u.prices.output) / 1e6;
     expect(u.usd).toBeCloseTo(5 * one, 10);
+  });
+});
+
+describe("images", () => {
+  const IMG = "data:image/jpeg;base64," + "SU1HREFUQQ".repeat(200); // must never reach the logs
+  const post = (messages: unknown) =>
+    fetch(`${S}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stream: true, messages }) });
+  const withImages = (n: number) => [{ role: "user", content: [{ type: "text", text: "what is this?" }, ...Array(n).fill({ type: "image_url", image_url: IMG })] }];
+
+  test("text + image parts are forwarded unchanged", async () => {
+    const res = await post(withImages(1));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('"type":"done"');
+    const user = seen.at(-1)!.body.messages[1];
+    expect(user.content).toEqual(withImages(1)[0].content);
+  });
+
+  test("only inline data:image URLs (no remote fetch by Mistral)", async () => {
+    const bad = [{ role: "user", content: [{ type: "image_url", image_url: "https://example.com/a.png" }] }];
+    expect((await post(bad)).status).toBe(400);
+  });
+
+  test("unknown part types and assistant parts are rejected", async () => {
+    expect((await post([{ role: "user", content: [{ type: "audio", data: "x" }] }])).status).toBe(400);
+    expect((await post([{ role: "user", content: [] }])).status).toBe(400);
+    expect((await post([{ role: "assistant", content: [{ type: "text", text: "x" }] }])).status).toBe(400);
+  });
+
+  test("image cap per conversation", async () => {
+    const n = seen.length;
+    const res = await post(withImages(17));
+    expect(res.status).toBe(413);
+    expect((await res.json()).kind).toBe("too_large");
+    expect(seen.length).toBe(n);
+  });
+
+  test("logs image count and size, never image data", async () => {
+    await Bun.sleep(50);
+    expect(logs).toMatch(/"images":1,"imageBytes":\d+/);
+    expect(logs).not.toContain("SU1HREFUQQ");
   });
 });
 

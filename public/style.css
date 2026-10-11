@@ -66,6 +66,7 @@ main { flex: 1; overflow-y: auto; padding-block: 24px; display: flex; flex-direc
 .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px; }
 .chip[data-kind]::before { content: attr(data-kind); text-transform: uppercase; font-size: 10px; font-weight: 700; color: var(--accent); }
 .chip button { border: 0; padding: 0 2px; color: var(--muted); }
+.chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; margin-left: -4px; }
 
 /* Composer: one card holding chips, textarea and the button bar */
 footer { padding-block: 0 16px; }
@@ -79,7 +80,7 @@ textarea { display: block; width: 100%; resize: none; max-height: 40vh; border: 
 
 /* Drop overlay */
 body.dragging::after {
-  content: "Drop .docx / .pdf to attach"; position: fixed; inset: 12px; display: grid; place-items: center;
+  content: "Drop documents or images to attach"; position: fixed; inset: 12px; display: grid; place-items: center;
   border: 2px dashed var(--accent); border-radius: 16px; background: color-mix(in srgb, var(--bg) 85%, transparent);
   font-size: 18px; font-weight: 600; color: var(--accent); pointer-events: none;
 }

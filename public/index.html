@@ -20,8 +20,8 @@
   <main id="log">
     <div class="hint">
       <h2>How can I help?</h2>
-      <p>Ask anything, or drop .docx / .pdf files to chat about them.
-        Files are read locally; only text goes to Mistral (EU, stateless), and nothing is stored.</p>
+      <p>Ask anything, or drop documents (.docx, .pdf) and images to chat about them.
+        Paste screenshots with Ctrl+V. Sent to Mistral EU statelessly; nothing is stored.</p>
     </div>
   </main>
 
@@ -31,7 +31,7 @@
       <textarea id="input" rows="2" placeholder="Message MISTI..."></textarea>
       <div class="bar">
         <button id="attach" type="button">+ Attach</button>
-        <input id="file" type="file" accept=".docx,.pdf" multiple hidden>
+        <input id="file" type="file" accept=".docx,.pdf,image/png,image/jpeg,image/webp,image/gif" multiple hidden>
         <span class="spacer"></span>
         <span class="keys">Enter to send &middot; Shift+Enter for newline</span>
         <button id="send" type="submit" class="primary">Send</button>
@@ -40,6 +40,7 @@
   </footer>
 
   <script src="/md.js"></script>
+  <script src="/img.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
