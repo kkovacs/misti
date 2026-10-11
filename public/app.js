@@ -4,6 +4,7 @@ const $ = (sel) => document.querySelector(sel);
 const history = []; // [{role, content}] exactly as sent to /api/chat
 let pending = []; // extracted docs waiting to be attached to the next question
 let busy = null; // AbortController of the in-flight chat
+let chatGen = 0; // bumped by "New chat"; stale turns must not touch the new chat
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -12,6 +13,7 @@ const el = (tag, cls, text) => {
   return e;
 };
 const log = $("#log");
+const hint = $(".hint");
 const add = (node) => {
   log.append(node);
   log.scrollTop = log.scrollHeight;
@@ -93,6 +95,7 @@ async function send(question) {
   const ui = assistantBubble();
   ui.meta.textContent = "thinking...";
 
+  const gen = chatGen;
   busy = new AbortController();
   setBusy(true);
   let answer = "";
@@ -137,6 +140,7 @@ async function send(question) {
     if (error) throw new Error(error.message);
     if (!done) throw new Error("connection to local server ended unexpectedly");
   } catch (err) {
+    if (gen !== chatGen) return; // aborted by "New chat": nothing to roll back into
     // Roll back the turn so the user can simply retry (question + docs restored).
     history.pop();
     ui.b.classList.add("error");
@@ -189,6 +193,19 @@ $("#input").onkeydown = (e) => {
   }
 };
 $("#attach").onclick = () => $("#file").click();
+
+// New chat: stop any answer in flight, drop history, pending docs and the visible log.
+// The server keeps nothing, so this is a full reset (cost counter is server-side, stays).
+$("#new").onclick = () => {
+  chatGen++;
+  busy?.abort();
+  history.length = 0;
+  pending = [];
+  renderPending();
+  log.replaceChildren(hint);
+  $("#input").value = "";
+  $("#input").focus();
+};
 $("#file").onchange = (e) => {
   upload([...e.target.files]);
   e.target.value = "";
