@@ -10,11 +10,15 @@ Zero Data Retention (ZDR) compliance requirement.
 
 - **ZDR**: only stateless Mistral endpoints. Never `/v1/files` or any stateful
   API (agents, batch, conversations, libraries). Documents are never
-  "uploaded"; only extracted text is sent in a stateless request body.
+  "uploaded" to Mistral; only extracted text is sent in a stateless request
+  body. (ZDR itself is active on the Mistral account — out of scope here.)
 - **Endpoint**: `https://api.eu.mistral.ai` (code constant fallback if not in .env)
 - **Model**: `mistral-large-4` (code constant if not in .env; confirmed present via
   `GET /v1/models`)
-- **Bind**: `127.0.0.1:31571`, single user, no auth
+- **Bind**: `127.0.0.1:31571`, single user, no auth (see Local security)
+- **Topology**: browser -> Bun server -> Mistral. Direct browser -> Mistral is
+  ruled out (CORS; API key would live in the browser). The API key, cost
+  counter, streaming and fallback logic all live server-side.
 - **Runtime**: plain source directory — ship source only, no bundled
   node_modules (registry is reachable). `bun install` + `bun server.ts` on the
   box. No compiled `.exe` (trips corporate EDR). No Python, no system
@@ -35,47 +39,63 @@ Stateful — out of scope (files stored): agents, batch, conversations,
 libraries, **`/v1/files`**, Vibe Work, Chat (the stateful chat product —
 distinct from the stateless `/v1/chat/*` endpoints above).
 
-## Mistral OCR — ruled out for local files
+## Mistral OCR — ZDR-clean via data: URI, deferred to V2
 
-Probed live (`/v1/ocr` -> 422) and confirmed against official docs. The
-`document` input field accepts only:
+`/v1/ocr` is stateless and accepts local files inline as base64 **data URIs**
+(verified live, HTTP 200):
 
-- `document_url` — file at a public URL Mistral fetches
-- `image_url` — image at a public URL
-- `file` — `file_id` from the stateful `/v1/files` API (violates ZDR)
+- PDF: `document: { type: "document_url", document_url: "data:application/pdf;base64,..." }`
+  -> synthetic "HELLO ZDR" PDF returned `## HELLO ZDR`
+- Image: `document: { type: "image_url", image_url: "data:image/png;base64,..." }`
 
-No base64 input exists (`image_base64` is response-only). Local files
-therefore have no ZDR-clean path into OCR. **OCR is dropped; extraction is
-fully local.**
+(An earlier 422 came from a non-existent `document_base64` type in `probe.ts`.)
+Never use the `file` / `file_id` input — it requires stateful `/v1/files`.
+
+**V1**: extraction stays fully local; scanned PDFs get an error.
+**V2**: OCR as fallback for PDFs with no text layer.
 
 ## Config (.env)
 
 - `.env` requires **`MISTRAL_API_KEY`**. Optional overrides: endpoint,
   model, `STREAM_IDLE_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `MAX_DOC_CHARS`.
-- **No proxy configuration in V1.**
+- **No proxy configuration in V1** (Bun reads `HTTP(S)_PROXY` from env on its
+  own; see Corporate proxy).
 
 ## Architecture
 
 ```
 misti/
-├─ work/            Workspace area for files.
-├─ server.ts        Bun.serve — static public/ + POST /api/chat + GET /api/health + GET /api/usage
-├─ extract.ts       [done] docx/pdf -> text; "no text layer" guard
+├─ server.ts        Bun.serve — static public/ + POST /api/extract + POST /api/chat
+│                   + GET /api/health + GET /api/usage
+├─ extract.ts       docx/pdf bytes -> text; "no text layer" guard
+├─ probe.ts         standalone de-risking probe (OCR via data: URI + chat streaming)
 ├─ mistral-openapi.yaml  Mistral API reference (source-noted in header)
 ├─ public/
-│  ├─ index.html    chat box + drag-drop docx/pdf + streaming toggle + health button + cost-since-start + copy-to-clipboard
-│  ├─ app.js        vanilla JS (no framework)
+│  ├─ index.html    chat box + drag-drop docx/pdf + streaming toggle + health button
+│  │                + cost-since-start + copy-to-clipboard
+│  ├─ app.js        vanilla JS (no framework); holds all conversation state
+│  ├─ md.js         tiny dependency-free Markdown renderer (escape-first, XSS-safe)
 │  └─ style.css     minimal dark UI
+├─ test/            bun tests (see Testing)
 ├─ .env             MISTRAL_API_KEY + optional overrides (gitignored)
+├─ .env.example     all knobs, documented
 └─ .gitignore       .env, node_modules
 ```
 
+- **`POST /api/extract`**: browser uploads the dropped file (multipart);
+  server extracts in memory and returns the text. Nothing is written to disk.
+  `extract.ts` takes a buffer + filename instead of a path.
+- **`POST /api/chat`**: browser sends the full conversation (doc text +
+  history) each turn; server proxies to Mistral. The server holds no
+  conversation state — only the cost counter.
+
 ## Document handling
 
-- **Approach: dump documents.** Attach docx/pdf -> extract -> dump full text
-  into each turn. No chunking/RAG; a tool-based corpus agent is deferred to V2.
-- **One tool in V1**: ability to write `.md` and `.html` files into `work/`
-  (the only tool; document ingestion stays a plain dump).
+- **Approach: dump documents.** Attach docx/pdf -> extract -> full text goes
+  into the conversation once, at the start (stable prefix -> Mistral prompt
+  cache applies on later turns). No chunking/RAG; a tool-based corpus agent
+  is deferred to V2.
+- **No tools in V1.** No file writing.
 - **docx** -> `mammoth` (strict zip parser; corrupt files fail fast — accepted)
 - **PDF** -> `unpdf` (pdf.js text layer)
 - **Scanned PDF** (no text layer) -> clear error: "scanned, not supported in V1"
@@ -83,7 +103,15 @@ misti/
   `MAX_DOC_CHARS` guard (default ~400k) with a fail-fast "too large" error.
   (`mistral-large-4` has a 1M-token context, so this guard is cost control,
   not a context limit.)
-- **Copy to clipboard** button on every assistant response.
+- **Copy to clipboard** button on every assistant response — copies the raw
+  markdown.
+- Answers are rendered as Markdown by `public/md.js` (headings, lists, tables,
+  code, quotes, bold/italic, http(s) links). Everything is HTML-escaped first,
+  because model output can echo document content.
+- Reasoning output (`thinking` content chunks) is dropped; only `text` chunks
+  are shown.
+- On a failed turn the client rolls back: question and documents are restored
+  for a retry.
 - pdf.js `TT: undefined function` warning silenced in the server.
 
 ## Dependencies
@@ -106,19 +134,21 @@ misti/
   cost = (uncached_prompt x input + cached x cache-read + completion x output) / 1M
 - Counter is **in-memory only** (since server start; resets on
   restart/reload). No persistence — consistent with stateless V1.
+- **Known undercount**: `usage` arrives only in the final stream chunk, so a
+  truncated stream that triggers a retry is billed by Mistral but not
+  counted. Accepted — the counter is an estimate.
 
 ## Streaming & resilience (corporate-hostile network)
 
 - Streaming on by default, progressive rendering.
-- A buffering proxy is fine: the whole SSE body may arrive as one burst at the
-  end; the client renders it then. Progressive display is the only casualty.
 - **Auto-fallback**: on stream error OR truncated stream (no `[DONE]` sentinel)
-  -> retry once with `stream: false`.
+  -> retry once with `stream: false`. API errors (4xx/5xx JSON) are not retried.
+- Reading stops at `[DONE]` — a proxy holding the connection open afterwards
+  must not trip the idle watchdog into a needless (billed) retry.
 - **Safety timeouts** (env-tunable; generous, never latency-triggered into a
   false fallback):
   - `STREAM_IDLE_TIMEOUT_MS` (default 60_000): no bytes for this long ->
-    abort + buffered retry. Wide enough that slow prefill on a large doc never
-    trips it; only fires on a genuinely silent hang.
+    abort + buffered retry. Hang detector only.
   - `REQUEST_TIMEOUT_MS` (default 300_000): hard ceiling for the Mistral call;
     fail fast with a clear error.
 - **Manual "no streaming" toggle** in the UI, for proxies that actively mangle
@@ -128,26 +158,84 @@ misti/
 - Health button lets the user re-test connectivity after a VPN change without
   burning a full document request (call the "model list" endpoint).
 
+## Corporate proxy (main deployment risk)
+
+Bun `fetch` honors `HTTP_PROXY`/`HTTPS_PROXY`. Likely failure modes, most
+likely first:
+
+1. **TLS inspection** — proxy re-signs with a corporate root CA Bun doesn't
+   trust (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY` etc.). Fix without code:
+   `NODE_EXTRA_CA_CERTS=/path/to/corp-ca.pem`.
+2. **PAC/WPAD-only proxy** — no env vars set, Bun goes direct and is blocked.
+   Fix: set `HTTPS_PROXY` manually.
+3. **Authenticating proxy (NTLM/Kerberos)** — not supported by Bun. No V1 fix.
+
+Logging (below) must make it obvious which of these happened.
+
+## Logging
+
+Verbose, to **stdout only**. One line per event, each tagged with a request id.
+
+- **Startup**: Bun version, endpoint, model, which proxy env vars are set
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, lowercase variants; credentials
+  redacted), whether `NODE_EXTRA_CA_CERTS` is set, price source (models.dev
+  vs. fallback).
+- **Per Mistral call**: start (endpoint, model, stream on/off, prompt chars);
+  time to response headers; HTTP status; proxy-revealing response headers
+  (`via`, `server`, `content-type`, `x-cache`, Mistral request id);
+  time to first byte; chunk count + total bytes; longest gap between chunks;
+  `[DONE]` seen or not; `finish_reason`; `usage`; fallback triggered + reason;
+  total duration.
+- **Errors**: `err.name`, `err.code`, `err.cause` (distinguishes TLS / DNS /
+  connection refused / timeout / abort). Non-JSON or unexpected responses:
+  status, content-type, body length.
+- **Local requests**: method, path, status, duration; rejected Host/Origin.
+- **Never logged**: API key, document text, filenames (extension + size only),
+  prompts, model output, or any part of a response body (not even error
+  bodies). A Mistral JSON error message (e.g. "Unauthorized") is shown in the
+  UI only.
+
+## Local security
+
+No auth, but guard against drive-by browser attacks (CSRF, DNS rebinding)
+spending the API key:
+
+- Reject (403) any request whose `Host` is not `127.0.0.1:31571` or
+  `localhost:31571`.
+- Reject (403) any POST whose `Origin` header is present and is not
+  `http://127.0.0.1:31571` or `http://localhost:31571`.
+
+## Testing
+
+`bun test` (no network, no API key needed):
+
+- `test/extract.test.ts` — pdf, scanned pdf, docx, corrupt docx, unsupported
+  type (synthetic files built in `test/fixtures.ts`).
+- `test/md.test.ts` — renderer output + escaping/XSS cases.
+- `test/server.test.ts` — spawns the real `server.ts` (`MISTI_PORT=31599`,
+  `--no-env-file`) against a mock Mistral: Host/Origin guard, health, extract,
+  streaming + buffered chat, truncated / silent / lingering streams, API error,
+  HTML-from-proxy, deadline, size guard, cost totals, and a log audit (no key,
+  doc text, filenames or bodies in stdout).
+
+`MISTI_PORT` exists only for tests; production stays on 31571.
+
 ## V1 non-goals
 
 - No chunking/RAG, no embeddings
+- No tools, no file writing
 - No history persistence (stateless; reload = fresh)
-- No export of the chat transcript (copy-to-clipboard per response instead);
-  the `.md`/`.html` write tool is a model tool, not a transcript export
+- No export of the chat transcript (copy-to-clipboard per response instead)
 - No cost persistence (in-memory counter only)
 - No auth, but listen on localhost
-- No scanned-PDF support (error only)
+- No scanned-PDF support (error only; OCR is V2)
 - No corrupt-file recovery (fail fast only)
-- No proxy configuration, no Windows-registry proxy auto-read, hope bun handles proxy for us
+- No proxy configuration, no Windows-registry/PAC proxy auto-read; rely on
+  Bun's env-var proxy support
 
 ## Open questions
 
-- **LLM call topology (undecided)**: do chat calls go browser → Mistral
-  directly, or browser → Bun server → Mistral? This spec currently assumes a
-  server proxy (`POST /api/chat`), but this is not settled. It determines where
-  the API key lives, where the cost counter lives, and whether
-  streaming/fallback and the `.md`/`.html` write tool run client- or
-  server-side. Decide before implementing `/api/chat` and the tool loop.
+- None currently.
 
 ## Verified so far
 
@@ -157,7 +245,17 @@ misti/
 - PDF: 12 real born-digital docs, 18k-57k chars each (18-93 pages); largest
   ~15k tokens -> stuff-the-prompt is safe for this corpus.
 - Bun `fetch` honors `HTTP_PROXY`/`HTTPS_PROXY` and re-reads per request
-  (local test) — relevant only if proxy support is ever added (V2).
+  (local test).
 - No cost/pricing field in any response: `/v1/pricing` + `/v1/prices` -> 404;
   chat completion returns `usage` only (`prompt_tokens`, `completion_tokens`,
   `prompt_tokens_details.cached_tokens`, `service_tier`).
+- `/v1/ocr` accepts base64 data URIs for PDF (`document_url`) and images
+  (`image_url`) — HTTP 200 (V2 path).
+- Reasoning tokens are billed inside `completion_tokens`: "Say hi in 3 words"
+  -> 435 completion tokens. Expect output cost well above the visible text.
+- Failure paths against real targets: connection refused, self-signed TLS
+  (`DEPTH_ZERO_SELF_SIGNED_CERT` + CA hint), HTML 405 from a non-Mistral host,
+  dead proxy, idle-timeout fallback, request deadline — each produces the right
+  error kind and a diagnosable log line.
+- Browser E2E (obscura headless, CDP, `--allow-private-network`): load, health,
+  PDF upload, streamed answer grounded in the doc, follow-up turn using history.

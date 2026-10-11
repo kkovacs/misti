@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "start": "bun server.ts",
+    "test": "bun test"
+  },
   "dependencies": {
     "@types/bun": "^1.4.2",
     "mammoth": "^1.13.0",

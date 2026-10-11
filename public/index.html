@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MISTI</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <strong>MISTI</strong>
+    <button id="health" type="button">Health</button>
+    <span id="health-status"></span>
+    <span class="spacer"></span>
+    <label><input id="stream" type="checkbox" checked> streaming</label>
+    <span id="cost" title="Estimated cost since server start">$0.0000</span>
+  </header>
+
+  <main id="log">
+    <p class="hint">Drop .docx / .pdf files anywhere (or use Attach), then ask a question.
+      Documents are extracted locally; only their text is sent to Mistral (EU, stateless).
+      Reload = fresh conversation.</p>
+  </main>
+
+  <footer>
+    <div id="docs"></div>
+    <form id="form">
+      <button id="attach" type="button">Attach</button>
+      <input id="file" type="file" accept=".docx,.pdf" multiple hidden>
+      <textarea id="input" rows="3" placeholder="Ask about the documents... (Enter = send, Shift+Enter = newline)"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </footer>
+
+  <script src="/md.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
