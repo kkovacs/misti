@@ -22,7 +22,9 @@ Zero Data Retention (ZDR) compliance requirement.
 
 ## Compliance (ZDR)
 
-Stateless endpoints — in scope (from Mistral docs):
+Stateless endpoints — ZDR-compliant, i.e. "in scope" for the ZDR rule
+(from Mistral docs). V1 product scope uses only `/v1/chat/completions`
+(+ `GET /v1/models` for health):
 
 - `/v1/chat/completions`, `/v1/fim/completions`, `/v1/embeddings`
 - `/v1/moderations`, `/v1/chat/moderations`
@@ -30,7 +32,8 @@ Stateless endpoints — in scope (from Mistral docs):
 - `/v1/ocr`, `/v1/audio/speech`, `/v1/audio/transcriptions`
 
 Stateful — out of scope (files stored): agents, batch, conversations,
-libraries, **`/v1/files`**, Vibe Work, Chat.
+libraries, **`/v1/files`**, Vibe Work, Chat (the stateful chat product —
+distinct from the stateless `/v1/chat/*` endpoints above).
 
 ## Mistral OCR — ruled out for local files
 
@@ -47,7 +50,8 @@ fully local.**
 
 ## Config (.env)
 
-- `.env` contains **only `MISTRAL_API_KEY`**, everything else is optional.
+- `.env` requires **`MISTRAL_API_KEY`**. Optional overrides: endpoint,
+  model, `STREAM_IDLE_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `MAX_DOC_CHARS`.
 - **No proxy configuration in V1.**
 
 ## Architecture
@@ -59,19 +63,19 @@ misti/
 ├─ extract.ts       [done] docx/pdf -> text; "no text layer" guard
 ├─ mistral-openapi.yaml  Mistral API reference (source-noted in header)
 ├─ public/
-│  ├─ index.html    chat box + drag-drop docx/pdf + streaming toggle + health button + cost-today + copy-to-clipboard
+│  ├─ index.html    chat box + drag-drop docx/pdf + streaming toggle + health button + cost-since-start + copy-to-clipboard
 │  ├─ app.js        vanilla JS (no framework)
 │  └─ style.css     minimal dark UI
-├─ .env             MISTRAL_API_KEY only (gitignored)
+├─ .env             MISTRAL_API_KEY + optional overrides (gitignored)
 └─ .gitignore       .env, node_modules
 ```
 
 ## Document handling
 
-- **Approach: Option A (dump, no tools).** Attach docx/pdf -> extract ->
-  dump full text into each turn.
-  No local workspace, no markdown files (deferred to V2 as a tool-based corpus agent).
-- **One tool** in V1: ability to write `.md` and `.html` files into `work/`.
+- **Approach: dump documents.** Attach docx/pdf -> extract -> dump full text
+  into each turn. No chunking/RAG; a tool-based corpus agent is deferred to V2.
+- **One tool in V1**: ability to write `.md` and `.html` files into `work/`
+  (the only tool; document ingestion stays a plain dump).
 - **docx** -> `mammoth` (strict zip parser; corrupt files fail fast — accepted)
 - **PDF** -> `unpdf` (pdf.js text layer)
 - **Scanned PDF** (no text layer) -> clear error: "scanned, not supported in V1"
@@ -91,11 +95,15 @@ misti/
 ## Cost tracking
 
 - No pricing in the inference responses (model metadata + chat responses
-  carry `usage` tokens only — no currency). Model price sourced from models.dev on start.
-- Cost is computed locally: `usage` tokens x hardcoded price constants.
+  carry `usage` tokens only — no currency).
+- Price sourced from models.dev on start; on 5s timeout fall back to
+  hardcoded constants (USD/1M tokens): input 0.68, cache-read 0.07,
+  output 2.09. Reasoning tokens are assumed to land inside
+  `completion_tokens` (no separate rate).
+- Cost is computed locally: `usage` tokens x price constants.
 - **Cache-aware**: Mistral reports `usage.prompt_tokens_details.cached_tokens`;
   cached input is billed at the reduced cache-read rate.
-  cost = (uncached_prompt x input + cached x cached-input + completion x output) / 1M
+  cost = (uncached_prompt x input + cached x cache-read + completion x output) / 1M
 - Counter is **in-memory only** (since server start; resets on
   restart/reload). No persistence — consistent with stateless V1.
 
@@ -124,12 +132,22 @@ misti/
 
 - No chunking/RAG, no embeddings
 - No history persistence (stateless; reload = fresh)
-- No export-to-file (copy-to-clipboard per response instead)
+- No export of the chat transcript (copy-to-clipboard per response instead);
+  the `.md`/`.html` write tool is a model tool, not a transcript export
 - No cost persistence (in-memory counter only)
 - No auth, but listen on localhost
 - No scanned-PDF support (error only)
 - No corrupt-file recovery (fail fast only)
 - No proxy configuration, no Windows-registry proxy auto-read, hope bun handles proxy for us
+
+## Open questions
+
+- **LLM call topology (undecided)**: do chat calls go browser → Mistral
+  directly, or browser → Bun server → Mistral? This spec currently assumes a
+  server proxy (`POST /api/chat`), but this is not settled. It determines where
+  the API key lives, where the cost counter lives, and whether
+  streaming/fallback and the `.md`/`.html` write tool run client- or
+  server-side. Decide before implementing `/api/chat` and the tool loop.
 
 ## Verified so far
 
