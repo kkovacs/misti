@@ -1,7 +1,8 @@
 # AGENTS.md — MISTI
 
-Local, single-user Bun web UI for document Q&A/summarization against Mistral's EU
-endpoint, under a **Zero Data Retention (ZDR)** requirement. Runs on locked-down
+Local, single-user Bun chat UI (think duck.ai, but local) against Mistral's EU
+endpoint, with optional docx/pdf attachments for Q&A/summarization, under a
+**Zero Data Retention (ZDR)** requirement. Runs on locked-down
 corporate Windows boxes behind hostile proxies.
 
 Run: `bun install && bun server.ts` -> `http://127.0.0.1:31571`. Test: `bun test`.

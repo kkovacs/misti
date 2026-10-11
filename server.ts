@@ -15,9 +15,10 @@ const MAX_DOC_CHARS = Number(process.env.MAX_DOC_CHARS ?? 400_000);
 const HEALTH_TIMEOUT_MS = 15_000;
 
 const SYSTEM_PROMPT =
-  "You are a careful document-analysis assistant. Documents attached by the user appear inside " +
-  "<document> tags. Base your answers on them and say so when they do not contain the answer. " +
-  "Answer in the language of the user's question. Format answers in Markdown.";
+  "You are a helpful, precise assistant. The user may attach documents; they appear inside " +
+  "<document> tags. When answering about attached documents, base your answer on them and say so " +
+  "when they do not contain the answer. Answer in the language of the user's question. " +
+  "Format answers in Markdown.";
 
 if (!KEY) {
   console.error("MISTRAL_API_KEY is not set (put it in .env next to server.ts and start from that directory).");

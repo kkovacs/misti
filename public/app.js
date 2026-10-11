@@ -28,7 +28,8 @@ function renderPending() {
   const box = $("#docs");
   box.replaceChildren(
     ...pending.map((d, i) => {
-      const chip = el("span", "chip", `${d.name} (${d.chars.toLocaleString()} chars${d.pages ? `, ${d.pages} p` : ""})`);
+      const chip = el("span", "chip", `${d.name} · ${d.chars.toLocaleString()} chars${d.pages ? ` · ${d.pages} p` : ""}`);
+      if (d.kind) chip.dataset.kind = d.kind;
       const x = el("button", null, "x");
       x.type = "button";
       x.title = "Remove";
@@ -70,7 +71,10 @@ function userBubble(question, docs) {
   const b = el("div", "msg user");
   if (docs.length) {
     const chips = el("div", "chips");
-    for (const d of docs) chips.append(el("span", "chip", d.name));
+    for (const d of docs) {
+      const chip = chips.appendChild(el("span", "chip", d.name));
+      if (d.kind) chip.dataset.kind = d.kind;
+    }
     b.append(chips);
   }
   b.append(el("div", "text", question));
@@ -148,7 +152,7 @@ async function send(question) {
     ui.meta.replaceChildren(el("span", "error", err.name === "AbortError" ? "stopped" : err.message));
     pending = docs.concat(pending);
     renderPending();
-    if (!$("#input").value) $("#input").value = question;
+    if (!$("#input").value) setInput(question);
     return;
   } finally {
     busy = null;
@@ -176,6 +180,17 @@ function setBusy(on) {
   $("#attach").disabled = on;
 }
 
+// Textarea grows with its content (CSS caps it at 40vh).
+function grow() {
+  const t = $("#input");
+  t.style.height = "auto";
+  t.style.height = `${t.scrollHeight}px`;
+}
+function setInput(v) {
+  $("#input").value = v;
+  grow();
+}
+
 // --- wiring --------------------------------------------------------------------------------
 
 $("#form").onsubmit = (e) => {
@@ -183,7 +198,7 @@ $("#form").onsubmit = (e) => {
   if (busy) return busy.abort();
   const q = $("#input").value.trim();
   if (!q) return;
-  $("#input").value = "";
+  setInput("");
   send(q);
 };
 $("#input").onkeydown = (e) => {
@@ -192,6 +207,7 @@ $("#input").onkeydown = (e) => {
     if (!busy) $("#form").requestSubmit();
   }
 };
+$("#input").oninput = grow;
 $("#attach").onclick = () => $("#file").click();
 
 // New chat: stop any answer in flight, drop history, pending docs and the visible log.
@@ -203,7 +219,7 @@ $("#new").onclick = () => {
   pending = [];
   renderPending();
   log.replaceChildren(hint);
-  $("#input").value = "";
+  setInput("");
   $("#input").focus();
 };
 $("#file").onchange = (e) => {
