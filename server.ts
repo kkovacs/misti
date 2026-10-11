@@ -16,7 +16,7 @@ const MAX_IMAGES = 16; // per conversation: every image is re-sent (and billed) 
 const HEALTH_TIMEOUT_MS = 15_000;
 
 const SYSTEM_PROMPT =
-  "You are a helpful, precise assistant. The user may attach documents; they appear inside " +
+  "You are Misti, a helpful, precise auditor assistant. The user may attach documents; they appear inside " +
   "<document> tags. When answering about attached documents, base your answer on them and say so " +
   "when they do not contain the answer. Answer in the language of the user's question. " +
   "Format answers in Markdown.";
@@ -153,7 +153,7 @@ function textOf(content: unknown): string {
 }
 
 // One call to /v1/chat/completions, streaming or buffered.
-async function chatAttempt(id: string, messages: Msg[], stream: boolean, outer: AbortSignal, onDelta: (s: string) => void): Promise<Outcome> {
+async function chatAttempt(id: string, messages: Msg[], cacheKey: string | undefined, stream: boolean, outer: AbortSignal, onDelta: (s: string) => void): Promise<Outcome> {
   const idle = new AbortController();
   const signal = AbortSignal.any([outer, idle.signal]);
   let timer: Timer | undefined;
@@ -163,14 +163,20 @@ async function chatAttempt(id: string, messages: Msg[], stream: boolean, outer: 
     if (stream) timer = setTimeout(() => idle.abort(new ChatError("idle", `no bytes for ${STREAM_IDLE_TIMEOUT_MS} ms`)), STREAM_IDLE_TIMEOUT_MS);
   };
 
-  log(id, "mistral.start", { model: MODEL, stream, messages: messages.length, ...measure(messages) });
+  log(id, "mistral.start", { model: MODEL, stream, cacheKey, messages: messages.length, ...measure(messages) });
   const t0 = performance.now();
   arm();
   try {
     const res = await mistralFetch(id, "/v1/chat/completions", {
       method: "POST",
       signal,
-      body: JSON.stringify({ model: MODEL, stream, messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages] }),
+      body: JSON.stringify({
+        model: MODEL,
+        stream,
+        // Per-conversation key: Mistral's documented way to raise prompt-cache hit odds across turns.
+        ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
+        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+      }),
     });
     const ct = res.headers.get("content-type") ?? "";
 
@@ -294,7 +300,11 @@ function addUsage(u: Usage): number {
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 async function handleChat(id: string, req: Request): Promise<Response> {
-  const { messages, stream } = (await req.json()) as { messages: Msg[]; stream: boolean };
+  const { messages, stream, cacheKey } = (await req.json()) as { messages: Msg[]; stream: boolean; cacheKey?: string };
+  // Random per-chat id from the browser (never user data — Mistral warns against sensitive keys).
+  if (cacheKey !== undefined && !/^[A-Za-z0-9-]{8,64}$/.test(cacheKey)) {
+    return json({ kind: "bad_request", message: "cacheKey must be 8-64 chars of [A-Za-z0-9-]" }, 400);
+  }
   if (!Array.isArray(messages) || !messages.length || !messages.every(okMsg)) {
     return json({ kind: "bad_request", message: "messages must be [{role, content: string | user parts [text, image_url (data:image/...)]}]" }, 400);
   }
@@ -328,12 +338,12 @@ async function handleChat(id: string, req: Request): Promise<Response> {
       try {
         let out: Outcome;
         try {
-          out = await chatAttempt(id, messages, stream, ctl.signal, onDelta);
+          out = await chatAttempt(id, messages, cacheKey, stream, ctl.signal, onDelta);
         } catch (err) {
           if (!stream || !(err instanceof ChatError) || !RETRYABLE.includes(err.kind)) throw err;
           log(id, "chat.fallback", { reason: err.kind, message: err.message });
           send({ type: "reset", reason: err.message });
-          out = await chatAttempt(id, messages, false, ctl.signal, onDelta);
+          out = await chatAttempt(id, messages, cacheKey, false, ctl.signal, onDelta);
         }
         const cost = out.usage ? addUsage(out.usage) : 0;
         if (!out.usage) log(id, "chat.no_usage");

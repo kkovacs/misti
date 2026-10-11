@@ -1,7 +1,7 @@
 # AGENTS.md — MISTI
 
 Local, single-user Bun chat UI (think duck.ai, but local) against Mistral's EU
-endpoint, with optional docx/pdf attachments for Q&A/summarization, under a
+endpoint, with optional docx/pdf/image attachments, under a
 **Zero Data Retention (ZDR)** requirement. Runs on locked-down
 corporate Windows boxes behind hostile proxies.
 
@@ -32,8 +32,13 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   each turn) — it is cost control, not a context limit.
 - `extract.ts`: docx -> mammoth, pdf -> unpdf (pdf.js text layer). Empty text
   layer = scanned PDF -> explicit error. Corrupt files throw (fail fast, accepted).
-- `public/`: vanilla JS, no framework, no build step. `md.js` is a deliberate
-  tiny Markdown renderer (no dependency).
+- **Images** never touch the server's extractor: the browser shrinks them
+  (`img.js`, canvas -> JPEG data URL) and the user turn becomes
+  `[text, image_url...]` parts; turns without images stay plain strings.
+  Images are re-sent (and billed) every turn, hence the shrink and the
+  per-conversation image cap.
+- `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` are
+  deliberate tiny helpers (no dependency), CommonJS-exported for bun tests.
 - Server -> browser is NDJSON (`delta` / `reset` / `done` / `error`). The
   localhost hop always streams; the streaming toggle only affects the
   server -> Mistral call.
@@ -46,6 +51,8 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   not even error bodies. `ChatError.message` is loggable; `ChatError.detail`
   (e.g. Mistral's JSON error text) goes to the UI only. `test/server.test.ts`
   audits the log; keep it passing.
+- Logs record image count/bytes only, never image data. `image_url` must be a
+  `data:image/` URL — a remote URL would make Mistral fetch from a third party.
 - Model output can echo document content: **never put raw text into
   `innerHTML`**. Only `renderMarkdown()` output (escape-first, http(s)-only
   links) goes there.
@@ -63,6 +70,14 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   may be an **array of typed chunks**; keep only `type: "text"` (`textOf()`).
   Reasoning tokens are billed inside `completion_tokens` and are large
   (hundreds for "say hi").
+- `mistral-large-4` has vision. Tiny images (16x16) are **silently ignored**
+  (no error, no tokens); `img.js` upscales below a minimum (empirical, `XXX`).
+- **Prompt caching** (verified on `mistral-large-4`, differs from the docs):
+  automatic, but prompts under ~1k tokens never cache, with or without a key
+  (docs claim 64). Cached counts step in ~512-token blocks, so the last few
+  hundred tokens are always uncached; the first turn always shows 0. The
+  browser sends a random per-chat `prompt_cache_key` (new on "New chat") —
+  Mistral's documented hit-rate lever; never put user data in it.
 - No pricing in any API response (`/v1/pricing`, `/v1/prices` -> 404). Prices
   come from models.dev (`mistral.models[<model>].cost`) at startup, falling
   back to constants in `server.ts`. Cost = uncached input + cached input at
@@ -102,7 +117,13 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   --allow-private-network`). Its default `page-1` target has no page: connect
   to `ws://127.0.0.1:9222/devtools/browser`, `Target.createTarget`, then
   `Target.attachToTarget {flatten: true}` and send with `sessionId`.
-  `upload()` and `history` are page globals, handy for driving the UI.
+  `upload()`, `pending`, `history`, `renderMarkdown()` are page globals, handy
+  for staging UI states without API calls. `Page.captureScreenshot` works
+  (1280x720 default; `Emulation.setDeviceMetricsOverride` for other sizes).
+- obscura gaps: ignores `Emulation.setEmulatedMedia` (dark mode — inject the
+  dark tokens instead), no `DataTransfer`, canvas can't decode/encode images
+  (`createImageBitmap` -> 0x0, `toDataURL` -> `"data:,"`), and `transform` on
+  pseudo-elements. Image shrinking must be checked in a real browser.
 - Don't `pkill -f "bun server.ts"` from a shell whose command line contains
   that string — it kills itself.
 
@@ -118,4 +139,6 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 ## References
 
 - `mistral-openapi.yaml` (repo) — Mistral API reference used for this work.
+- https://docs.mistral.ai/studio/conversations/advanced/prompt-caching —
+  prompt caching (`prompt_cache_key`, 10% price for cached tokens).
 - https://models.dev/api.json — price source.

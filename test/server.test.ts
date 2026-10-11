@@ -154,6 +154,21 @@ describe("api", () => {
     expect(last.body.model).toBe("mistral-large-4");
   });
 
+  test("cacheKey is forwarded as prompt_cache_key; absent stays absent; junk rejected", async () => {
+    const key = "0b9c5c8e-2f1a-4c4e-9d77-3a1f5e2b8c10";
+    const post = (extra: object) =>
+      fetch(`${S}/api/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stream: false, messages: [{ role: "user", content: "hi" }], ...extra }),
+      });
+    expect((await post({ cacheKey: key })).status).toBe(200);
+    expect(seen.at(-1)!.body.prompt_cache_key).toBe(key);
+    expect((await post({})).status).toBe(200);
+    expect("prompt_cache_key" in seen.at(-1)!.body).toBe(false);
+    expect((await post({ cacheKey: "my secret doc name.pdf" })).status).toBe(400);
+  });
+
   test("chat buffered: thinking chunks dropped", async () => {
     const evs = await chat("hi", false);
     expect(textOf(evs)).toBe("Buffered answer");
@@ -210,11 +225,11 @@ describe("api", () => {
 
   test("usage accumulates over successful calls", async () => {
     const u = await (await fetch(`${S}/api/usage`)).json();
-    expect(u.calls).toBe(5); // stream, buffered, truncate-retry, hang-retry, linger
-    expect(u.promptTokens).toBe(500);
-    expect(u.cachedTokens).toBe(200);
+    expect(u.calls).toBe(7); // stream, 2x cacheKey, buffered, truncate-retry, hang-retry, linger
+    expect(u.promptTokens).toBe(700);
+    expect(u.cachedTokens).toBe(280);
     const one = (60 * u.prices.input + 40 * u.prices.cache_read + 50 * u.prices.output) / 1e6;
-    expect(u.usd).toBeCloseTo(5 * one, 10);
+    expect(u.usd).toBeCloseTo(7 * one, 10);
   });
 });
 

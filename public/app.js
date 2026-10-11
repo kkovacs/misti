@@ -5,6 +5,7 @@ const history = []; // [{role, content}] exactly as sent to /api/chat
 let pending = []; // extracted docs waiting to be attached to the next question
 let busy = null; // AbortController of the in-flight chat
 let chatGen = 0; // bumped by "New chat"; stale turns must not touch the new chat
+let chatId = crypto.randomUUID(); // prompt_cache_key: same id for every turn of one chat
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -135,7 +136,7 @@ async function send(question) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history, stream: $("#stream").checked }),
+      body: JSON.stringify({ messages: history, stream: $("#stream").checked, cacheKey: chatId }),
       signal: busy.signal,
     });
     if (!res.ok) {
@@ -240,6 +241,7 @@ $("#attach").onclick = () => $("#file").click();
 // The server keeps nothing, so this is a full reset (cost counter is server-side, stays).
 $("#new").onclick = () => {
   chatGen++;
+  chatId = crypto.randomUUID();
   busy?.abort();
   history.length = 0;
   pending = [];
