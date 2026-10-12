@@ -1,5 +1,6 @@
 - [ ] Progress bar for context
 - [x] Animated thinking
+  - [ ] XXX Stopped/broken turns get no `usage`, so the cost counter misses their (billed) reasoning. Could add est. tokens (`CHARS_PER_TOKEN`) x output price, marked as estimate.
 - [ ] xlsx reader?
 - [ ] codemode? (how?)
 - [ ] docx/xlsx writer?
