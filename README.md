@@ -35,7 +35,7 @@ Ezután böngészőben: <http://127.0.0.1:31571>
 - Proxy esetén: `HTTPS_PROXY=http://proxy.ceg:8080` a `.env`-ben.
 - Ha a cég TLS-forgalmat vizsgál (tanúsítványhiba az indítás után):
   `NODE_EXTRA_CA_CERTS=C:\út\a\ceges-root-ca.pem`.
-- A **Health** gomb próbahívással ellenőrzi a kapcsolatot (pl. VPN-váltás után).
+- A **Healthcheck** gomb próbahívással ellenőrzi a kapcsolatot (pl. VPN-váltás után).
 - Hiba esetén a konzol részletes, de tartalommentes naplót ír — ezt kell
   továbbítani hibabejelentéskor.
 
