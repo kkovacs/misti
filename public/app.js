@@ -137,18 +137,19 @@ async function send(question) {
   let answer = "";
   let done = null;
   let error = null;
+  let cut = null; // why a partial answer ended early (Stop / error)
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history, stream: $("#stream").checked, cacheKey: chatId }),
+      body: JSON.stringify({ messages: history, cacheKey: chatId }),
       signal: busy.signal,
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
       throw new Error(data.message);
     }
-    // NDJSON events: delta / reset (streaming failed, buffered retry follows) / done / error.
+    // NDJSON events: delta / done / error.
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -165,10 +166,6 @@ async function send(question) {
           ui.text.innerHTML = renderMarkdown(answer); // md.js escapes everything
           ui.meta.textContent = "";
           log.scrollTop = log.scrollHeight;
-        } else if (ev.type === "reset") {
-          answer = "";
-          ui.text.replaceChildren();
-          ui.meta.textContent = `stream failed (${ev.reason}) — retrying without streaming...`;
         } else if (ev.type === "done") done = ev;
         else if (ev.type === "error") error = ev;
       }
@@ -177,15 +174,19 @@ async function send(question) {
     if (!done) throw new Error("connection to local server ended unexpectedly");
   } catch (err) {
     if (gen !== chatGen) return; // aborted by "New chat": nothing to roll back into
-    // Roll back the turn so the user can simply retry (question + docs restored).
-    history.pop();
-    ui.b.classList.add("error");
-    ui.text.innerHTML = renderMarkdown(answer);
-    ui.meta.replaceChildren(el("span", "error", err.name === "AbortError" ? "stopped" : err.message));
-    pending = docs.concat(pending);
-    renderPending();
-    if (!$("#input").value) setInput(question);
-    return;
+    cut = err.name === "AbortError" ? "stopped" : err.message;
+    if (!answer) {
+      // Nothing arrived: roll back the turn so the user can simply retry (question + docs restored).
+      history.pop();
+      ui.b.classList.add("error");
+      ui.text.replaceChildren();
+      ui.meta.replaceChildren(el("span", "error", cut));
+      pending = docs.concat(pending);
+      renderPending();
+      if (!$("#input").value) setInput(question);
+      return;
+    }
+    // Partial answer: paid for, so it stays in history and "continue" can pick it up.
   } finally {
     busy = null;
     setBusy(false);
@@ -199,11 +200,13 @@ async function send(question) {
     copy.textContent = "Copied";
     setTimeout(() => (copy.textContent = "Copy"), 1500);
   };
+  if (cut) return ui.meta.replaceChildren(copy, el("span", "error", cut)); // no usage after an abort
   const u = done.usage;
   const info = u
     ? `${u.prompt_tokens.toLocaleString()} in (${(u.prompt_tokens_details?.cached_tokens ?? 0).toLocaleString()} cached) / ${u.completion_tokens.toLocaleString()} out`
     : "no usage reported";
-  const finish = done.finishReason && done.finishReason !== "stop" ? `finish: ${done.finishReason}` : null;
+  const fr = done.finishReason;
+  const finish = fr === "length" ? "cut off at the token limit - type 'continue'" : fr && fr !== "stop" ? `finish: ${fr}` : null;
   ui.meta.replaceChildren(copy, el("span", null, info), ...(u ? [money(el("span"), done.costUsd, done.fx)] : []), ...(finish ? [el("span", null, finish)] : []));
   money($("#cost"), done.totalUsd, done.fx);
 }

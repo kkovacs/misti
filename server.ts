@@ -9,7 +9,9 @@ const PORT = Number(process.env.MISTI_PORT ?? 31571); // override only for tests
 const BASE = process.env.MISTRAL_BASE_URL ?? "https://api.eu.mistral.ai";
 const MODEL = process.env.MISTRAL_MODEL ?? "mistral-large-4";
 const KEY = process.env.MISTRAL_API_KEY;
-const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 60_000);
+// Silence between chunks; generous, since long reasoning or a buffering proxy can stall a healthy stream.
+const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 600_000);
+// Until Mistral's response headers only; once the stream is open, a long answer must never be cut off.
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 300_000);
 const MAX_DOC_CHARS = Number(process.env.MAX_DOC_CHARS ?? 400_000);
 const MAX_IMAGES = 16; // per conversation: every image is re-sent (and billed) on every turn
@@ -58,7 +60,7 @@ function revealingHeaders(h: Headers): Record<string, string> {
 
 // --- errors --------------------------------------------------------------------------------
 
-type Kind = "network" | "api" | "timeout" | "idle" | "truncated" | "bad_response" | "too_large" | "aborted";
+type Kind = "network" | "api" | "timeout" | "idle" | "truncated" | "too_large" | "aborted";
 
 // `message` is safe to log; `detail` (from a response body) goes to the UI only, never to logs.
 class ChatError extends Error {
@@ -66,9 +68,6 @@ class ChatError extends Error {
     super(message);
   }
 }
-
-// Failures of the streaming attempt that a buffered retry might survive.
-const RETRYABLE: Kind[] = ["network", "idle", "truncated", "bad_response"];
 
 function networkError(err: any): ChatError {
   const code = String(err?.code ?? err?.cause?.code ?? err?.name ?? "");
@@ -152,50 +151,36 @@ function textOf(content: unknown): string {
   return "";
 }
 
-// One call to /v1/chat/completions, streaming or buffered.
-async function chatAttempt(id: string, messages: Msg[], cacheKey: string | undefined, stream: boolean, outer: AbortSignal, onDelta: (s: string) => void): Promise<Outcome> {
-  const idle = new AbortController();
-  const signal = AbortSignal.any([outer, idle.signal]);
+// One streaming call to /v1/chat/completions. No buffered fallback, no retry: SSE works, and retries cost money.
+async function chatCall(id: string, messages: Msg[], cacheKey: string | undefined, outer: AbortSignal, onDelta: (s: string) => void): Promise<Outcome> {
+  const timers = new AbortController();
+  const signal = AbortSignal.any([outer, timers.signal]);
+  // Deadline covers only the wait for headers (connect, proxy, TLS); generation itself is never timed.
+  const deadline = setTimeout(() => timers.abort(new ChatError("timeout", `no response headers within ${REQUEST_TIMEOUT_MS} ms (REQUEST_TIMEOUT_MS)`)), REQUEST_TIMEOUT_MS);
+  // Idle watchdog: only a stream silent for a long time (dead connection) trips it.
   let timer: Timer | undefined;
-  // Idle watchdog: only a genuinely silent stream trips it (buffered calls rely on the deadline).
   const arm = () => {
     clearTimeout(timer);
-    if (stream) timer = setTimeout(() => idle.abort(new ChatError("idle", `no bytes for ${STREAM_IDLE_TIMEOUT_MS} ms`)), STREAM_IDLE_TIMEOUT_MS);
+    timer = setTimeout(() => timers.abort(new ChatError("idle", `no bytes for ${STREAM_IDLE_TIMEOUT_MS} ms (STREAM_IDLE_TIMEOUT_MS)`)), STREAM_IDLE_TIMEOUT_MS);
   };
 
-  log(id, "mistral.start", { model: MODEL, stream, cacheKey, messages: messages.length, ...measure(messages) });
+  log(id, "mistral.start", { model: MODEL, cacheKey, messages: messages.length, ...measure(messages) });
   const t0 = performance.now();
-  arm();
   try {
     const res = await mistralFetch(id, "/v1/chat/completions", {
       method: "POST",
       signal,
       body: JSON.stringify({
         model: MODEL,
-        stream,
+        stream: true,
         // Per-conversation key: Mistral's documented way to raise prompt-cache hit odds across turns.
         ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
       }),
     });
+    clearTimeout(deadline);
+    arm();
     const ct = res.headers.get("content-type") ?? "";
-
-    if (!stream) {
-      const text = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        log(id, "mistral.bad_json", { contentType: ct, bodyLen: text.length });
-        throw new ChatError("bad_response", `unparseable response (${ct}, ${text.length} bytes) — proxy mangling?`);
-      }
-      const choice = data.choices?.[0];
-      const out = { content: textOf(choice?.message?.content), finishReason: choice?.finish_reason, usage: data.usage };
-      log(id, "mistral.done", { stream, ms: Math.round(performance.now() - t0), bytes: text.length, finishReason: out.finishReason, usage: out.usage });
-      onDelta(out.content);
-      return out;
-    }
-
     if (!ct.includes("text/event-stream")) log(id, "mistral.unexpected_content_type", { contentType: ct });
 
     // SSE: "data: {json}" lines, terminated by "data: [DONE]".
@@ -259,6 +244,7 @@ async function chatAttempt(id: string, messages: Msg[], cacheKey: string | undef
     if (signal.aborted) throw signal.reason;
     throw err;
   } finally {
+    clearTimeout(deadline);
     clearTimeout(timer);
   }
 }
@@ -317,7 +303,7 @@ function addUsage(u: Usage): number {
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 async function handleChat(id: string, req: Request): Promise<Response> {
-  const { messages, stream, cacheKey } = (await req.json()) as { messages: Msg[]; stream: boolean; cacheKey?: string };
+  const { messages, cacheKey } = (await req.json()) as { messages: Msg[]; cacheKey?: string };
   // Random per-chat id from the browser (never user data — Mistral warns against sensitive keys).
   if (cacheKey !== undefined && !/^[A-Za-z0-9-]{8,64}$/.test(cacheKey)) {
     return json({ kind: "bad_request", message: "cacheKey must be 8-64 chars of [A-Za-z0-9-]" }, 400);
@@ -336,12 +322,11 @@ async function handleChat(id: string, req: Request): Promise<Response> {
     return json({ kind: "too_large", message: `conversation has ${images} images, limit is ${MAX_IMAGES} — start a new chat` }, 413);
   }
 
-  // One controller for the hard deadline and browser disconnects; reasons are ChatErrors.
+  // Browser disconnect / Stop aborts the Mistral call; reasons are ChatErrors.
   const ctl = new AbortController();
-  const deadline = setTimeout(() => ctl.abort(new ChatError("timeout", `no answer within ${REQUEST_TIMEOUT_MS} ms (REQUEST_TIMEOUT_MS)`)), REQUEST_TIMEOUT_MS);
   req.signal.addEventListener("abort", () => ctl.abort(new ChatError("aborted", "client disconnected")));
 
-  // NDJSON to the browser: delta / reset / done / error. Localhost hop, so it always streams.
+  // NDJSON to the browser: delta / done / error. Localhost hop, so it always streams.
   const enc = new TextEncoder();
   const body = new ReadableStream({
     async start(controller) {
@@ -353,15 +338,7 @@ async function handleChat(id: string, req: Request): Promise<Response> {
       const onDelta = (text: string) => send({ type: "delta", text });
       const t0 = performance.now();
       try {
-        let out: Outcome;
-        try {
-          out = await chatAttempt(id, messages, cacheKey, stream, ctl.signal, onDelta);
-        } catch (err) {
-          if (!stream || !(err instanceof ChatError) || !RETRYABLE.includes(err.kind)) throw err;
-          log(id, "chat.fallback", { reason: err.kind, message: err.message });
-          send({ type: "reset", reason: err.message });
-          out = await chatAttempt(id, messages, cacheKey, false, ctl.signal, onDelta);
-        }
+        const out = await chatCall(id, messages, cacheKey, ctl.signal, onDelta);
         const cost = out.usage ? addUsage(out.usage) : 0;
         if (!out.usage) log(id, "chat.no_usage");
         send({ type: "done", finishReason: out.finishReason, usage: out.usage, costUsd: cost, totalUsd: totals.usd, fx });
@@ -372,7 +349,6 @@ async function handleChat(id: string, req: Request): Promise<Response> {
         log(id, "chat.error", { kind: e.kind, message: e.message, ms: Math.round(performance.now() - t0) });
         send({ type: "error", kind: e.kind, message: e.detail ? `${e.message}: ${e.detail}` : e.message });
       } finally {
-        clearTimeout(deadline);
         try {
           controller.close();
         } catch {}
@@ -451,7 +427,7 @@ async function route(id: string, req: Request, path: string): Promise<Response> 
 Bun.serve({
   hostname: "127.0.0.1",
   port: PORT,
-  idleTimeout: 0, // a buffered answer on a big doc can be silent for minutes; REQUEST_TIMEOUT_MS bounds it
+  idleTimeout: 0, // the browser gets no bytes while the model thinks (can be minutes); Mistral-side timers bound it
   async fetch(req) {
     const id = newId();
     const path = new URL(req.url).pathname;

@@ -14,7 +14,8 @@ const SECRET = "SECRET-DOC-MARKER-7731"; // must never appear in server logs
 const seen: { auth: string | null; body: any }[] = [];
 const usage = { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150, prompt_tokens_details: { cached_tokens: 40 } };
 const sse = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
-const delta = (text: string) => sse({ choices: [{ index: 0, delta: { content: text } }] });
+const delta = (content: unknown) => sse({ choices: [{ index: 0, delta: { content } }] });
+const END = [sse({ choices: [{ delta: {}, finish_reason: "stop" }], usage }), "data: [DONE]\n\n"];
 
 const mock = Bun.serve({
   port: 0,
@@ -30,22 +31,23 @@ const mock = Bun.serve({
     if (q.includes("ERR401")) return Response.json({ message: "Unauthorized" }, { status: 401 });
     if (q.includes("HTML")) return new Response("<html>blocked by proxy</html>", { status: 502, headers: { "content-type": "text/html" } });
 
-    if (!body.stream) {
-      if (q.includes("SLOW")) await Bun.sleep(3000);
-      // Reasoning models return content as typed chunks; thinking must be dropped.
-      const content = [{ type: "thinking", thinking: [{ type: "text", text: "hmm" }] }, { type: "text", text: "Buffered answer" }];
-      return Response.json({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage });
-    }
+    if (q.includes("LATE")) await Bun.sleep(2500); // no headers within REQUEST_TIMEOUT_MS
 
-    let frames: string[] = [delta("Hello"), delta(" world"), sse({ choices: [{ delta: {}, finish_reason: "stop" }], usage }), "data: [DONE]\n\n"];
-    if (q.includes("TRUNCATE")) frames = [delta("Hel")];
-    if (q.includes("HANG")) frames = [];
-    const hang = q.includes("HANG");
+    let frames: string[] = [delta("Hello"), delta(" world"), ...END];
+    // Reasoning models stream typed chunks; thinking must be dropped.
+    if (q.includes("THINK")) frames = [delta([{ type: "thinking", thinking: [{ type: "text", text: "hmm" }] }]), delta([{ type: "text", text: "Answer" }]), ...END];
+    if (q.includes("TRUNCATE") || q.includes("IDLE")) frames = [delta("Hel")];
+    // Trickle: total time > REQUEST_TIMEOUT_MS, every gap < STREAM_IDLE_TIMEOUT_MS.
+    if (q.includes("SLOW")) frames = [...Array(8).fill(delta(".")), ...END];
+    const gap = q.includes("SLOW") ? 300 : 0;
     return new Response(
       new ReadableStream({
         async start(c) {
-          for (const f of frames) c.enqueue(new TextEncoder().encode(f));
-          if (hang) return; // headers sent, then silence: idle watchdog must fire
+          for (const f of frames) {
+            c.enqueue(new TextEncoder().encode(f));
+            if (gap) await Bun.sleep(gap);
+          }
+          if (q.includes("IDLE")) return; // some bytes, then silence: idle watchdog must fire
           if (q.includes("LINGER")) return; // [DONE] sent but connection held open (proxy-like)
           c.close();
         },
@@ -95,11 +97,11 @@ afterAll(() => {
 });
 
 type Ev = { type: string; [k: string]: any };
-async function chat(content: string, stream = true): Promise<Ev[]> {
+async function chat(content: string): Promise<Ev[]> {
   const res = await fetch(`${S}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: S },
-    body: JSON.stringify({ stream, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({ messages: [{ role: "user", content }] }),
   });
   expect(res.status).toBe(200);
   return (await res.text()).trim().split("\n").map((l) => JSON.parse(l));
@@ -156,6 +158,7 @@ describe("api", () => {
     expect(last.auth).toBe(`Bearer ${KEY}`);
     expect(last.body.messages[0].role).toBe("system");
     expect(last.body.model).toBe("mistral-large-4");
+    expect(last.body.stream).toBe(true);
   });
 
   test("cacheKey is forwarded as prompt_cache_key; absent stays absent; junk rejected", async () => {
@@ -164,7 +167,7 @@ describe("api", () => {
       fetch(`${S}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ stream: false, messages: [{ role: "user", content: "hi" }], ...extra }),
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }], ...extra }),
       });
     expect((await post({ cacheKey: key })).status).toBe(200);
     expect(seen.at(-1)!.body.prompt_cache_key).toBe(key);
@@ -173,27 +176,35 @@ describe("api", () => {
     expect((await post({ cacheKey: "my secret doc name.pdf" })).status).toBe(400);
   });
 
-  test("chat buffered: thinking chunks dropped", async () => {
-    const evs = await chat("hi", false);
-    expect(textOf(evs)).toBe("Buffered answer");
+  test("thinking chunks dropped", async () => {
+    const evs = await chat("THINK");
+    expect(textOf(evs)).toBe("Answer");
     expect(evs.at(-1)!.type).toBe("done");
   });
 
-  test("truncated stream (no [DONE]) -> reset + buffered retry", async () => {
+  test("slow but steady stream outlives REQUEST_TIMEOUT_MS", async () => {
+    const evs = await chat("SLOW");
+    expect(textOf(evs)).toBe("........");
+    expect(evs.at(-1)!.type).toBe("done");
+  });
+
+  test("truncated stream (no [DONE]) -> error, partial deltas kept, no retry", async () => {
+    const n = seen.length;
     const evs = await chat("TRUNCATE");
-    expect(evs.map((e) => e.type)).toEqual(["delta", "reset", "delta", "done"]);
-    expect(evs[1].reason).toContain("[DONE]");
-    expect(textOf(evs.slice(2))).toBe("Buffered answer");
-    expect(seen.at(-1)!.body.stream).toBe(false);
+    expect(evs.map((e) => e.type)).toEqual(["delta", "error"]);
+    expect(evs[1]).toMatchObject({ kind: "truncated", message: expect.stringContaining("[DONE]") });
+    expect(seen.length).toBe(n + 1);
   });
 
-  test("silent stream -> idle watchdog -> buffered retry", async () => {
-    const evs = await chat("HANG");
-    expect(evs.map((e) => e.type)).toEqual(["reset", "delta", "done"]);
-    expect(evs[0].reason).toContain("no bytes");
+  test("silent stream -> idle watchdog -> error, no retry", async () => {
+    const n = seen.length;
+    const evs = await chat("IDLE");
+    expect(evs.map((e) => e.type)).toEqual(["delta", "error"]);
+    expect(evs[1]).toMatchObject({ kind: "idle", message: expect.stringContaining("no bytes") });
+    expect(seen.length).toBe(n + 1);
   });
 
-  test("[DONE] ends the stream even if the connection lingers (no false fallback)", async () => {
+  test("[DONE] ends the stream even if the connection lingers (no idle error)", async () => {
     const evs = await chat("LINGER");
     expect(evs.map((e) => e.type)).toEqual(["delta", "delta", "done"]);
   });
@@ -206,13 +217,13 @@ describe("api", () => {
   });
 
   test("HTML from upstream -> network/proxy error", async () => {
-    const evs = await chat("HTML", false);
+    const evs = await chat("HTML");
     expect(evs[0]).toMatchObject({ type: "error", kind: "network", message: expect.stringContaining("not from Mistral") });
   });
 
-  test("hard deadline -> timeout", async () => {
-    const evs = await chat("SLOW", false);
-    expect(evs[0]).toMatchObject({ type: "error", kind: "timeout" });
+  test("no response headers in time -> timeout", async () => {
+    const evs = await chat("LATE");
+    expect(evs).toEqual([{ type: "error", kind: "timeout", message: expect.stringContaining("headers") }]);
   });
 
   test("too large conversation -> 413 before any upstream call", async () => {
@@ -220,7 +231,7 @@ describe("api", () => {
     const res = await fetch(`${S}/api/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ stream: true, messages: [{ role: "user", content: "x".repeat(1001) }] }),
+      body: JSON.stringify({ messages: [{ role: "user", content: "x".repeat(1001) }] }),
     });
     expect(res.status).toBe(413);
     expect((await res.json()).kind).toBe("too_large");
@@ -229,11 +240,11 @@ describe("api", () => {
 
   test("usage accumulates over successful calls", async () => {
     const u = await (await fetch(`${S}/api/usage`)).json();
-    expect(u.calls).toBe(7); // stream, 2x cacheKey, buffered, truncate-retry, hang-retry, linger
-    expect(u.promptTokens).toBe(700);
-    expect(u.cachedTokens).toBe(280);
+    expect(u.calls).toBe(6); // stream, 2x cacheKey, think, slow, linger
+    expect(u.promptTokens).toBe(600);
+    expect(u.cachedTokens).toBe(240);
     const one = (60 * u.prices.input + 40 * u.prices.cache_read + 50 * u.prices.output) / 1e6;
-    expect(u.usd).toBeCloseTo(7 * one, 10);
+    expect(u.usd).toBeCloseTo(6 * one, 10);
     expect(u.priceSource).toBe("fallback constants");
     expect(u.fx.source).toBe("hardwired");
   });
@@ -242,7 +253,7 @@ describe("api", () => {
 describe("images", () => {
   const IMG = "data:image/jpeg;base64," + "SU1HREFUQQ".repeat(200); // must never reach the logs
   const post = (messages: unknown) =>
-    fetch(`${S}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stream: true, messages }) });
+    fetch(`${S}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages }) });
   const withImages = (n: number) => [{ role: "user", content: [{ type: "text", text: "what is this?" }, ...Array(n).fill({ type: "image_url", image_url: IMG })] }];
 
   test("text + image parts are forwarded unchanged", async () => {
@@ -282,7 +293,7 @@ describe("images", () => {
 describe("logging (runs last)", () => {
   test("rich forensics, but no key, doc text, prompts, filenames or bodies", async () => {
     await Bun.sleep(100); // let stdout drain
-    for (const ev of ["[startup] misti", "prices.fallback", "fx.fallback", "mistral.headers", "mistral.stream_end", "chat.fallback", "mistral.http_error", "http.rejected"]) {
+    for (const ev of ["[startup] misti", "prices.fallback", "fx.fallback", "mistral.headers", "mistral.stream_end", "mistral.http_error", "http.rejected"]) {
       expect(logs).toContain(ev);
     }
     expect(logs).not.toContain(KEY);

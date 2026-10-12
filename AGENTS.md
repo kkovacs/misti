@@ -40,9 +40,9 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 - `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` /
   `money.js` are deliberate tiny helpers (no dependency), CommonJS-exported for
   bun tests.
-- Server -> browser is NDJSON (`delta` / `reset` / `done` / `error`). The
-  localhost hop always streams; the streaming toggle only affects the
-  server -> Mistral call.
+- Always SSE to Mistral, NDJSON to the browser (`delta` / `done` / `error`).
+  Buffered mode and the buffered fallback retry were removed on purpose: SSE
+  works, and every retry was a second bill.
 
 ## Landmines
 
@@ -90,20 +90,33 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   USD->HUF regardless of the invoice currency (EUR). ECB rate via
   frankfurter.dev at startup; a hardwired, dated rate if unreachable (`XXX`
   refresh it). USD, rate, date and source live in the tooltip.
-- `usage` arrives only in the final SSE chunk: a truncated stream that gets
-  retried is billed but not counted. Accepted; the counter is an estimate.
+- `usage` arrives only in the final SSE chunk: a stopped or broken stream is
+  billed but not counted. Accepted; the counter is an estimate.
+- Output limit hit -> a normal end with `finish_reason: "length"` (answer kept,
+  UI says "type 'continue'"). A huge doc never translates in one answer, and
+  every "continue" re-sends doc + all output so far.
 
-**Streaming / resilience**
-- Fallback: a streaming failure (network, idle watchdog, missing `[DONE]`,
-  unparseable body) -> **one** buffered retry. API errors (JSON 4xx/5xx) are
-  never retried. Every retry costs money — don't add more.
+**Streaming / timeouts** (rule: never time out a call that is generating)
+- `REQUEST_TIMEOUT_MS` covers only the wait for response headers (connect,
+  proxy, TLS). Generation itself is never timed — long answers (translations)
+  used to die at a whole-request deadline. Assumes Mistral sends SSE headers
+  before reasoning starts (unverified on the real network: compare
+  `mistral.headers` ms vs `mistral.stream_end` ttfbMs).
+- The idle watchdog (`STREAM_IDLE_TIMEOUT_MS`) is a generous last resort for a
+  silently dead connection, not a liveness check: long reasoning or a buffering
+  proxy can be silent a long time. The user's Stop button is the real watchdog.
+- No retries at all: every failure is a visible error. Don't add any back.
 - **Stop reading at `[DONE]`.** A proxy holding the connection open afterwards
-  would otherwise trip the idle watchdog into a needless, billed retry.
-- `Bun.serve({ idleTimeout: 0 })` is deliberate: a buffered answer on a large
-  doc can be silent for minutes; `REQUEST_TIMEOUT_MS` is the real ceiling.
+  would otherwise trip the idle watchdog.
+- `Bun.serve({ idleTimeout: 0 })` is deliberate: the browser gets no bytes
+  while the model reasons, which can take minutes.
 - A non-JSON error response (HTML) is treated as "proxy / not Mistral".
-- Browser-side: "New chat" aborts the in-flight turn; the `chatGen` counter
-  stops that stale turn's error-rollback from leaking into the new chat.
+- Browser-side, Stop/error: streamed text **stays** in history (it was paid
+  for; "continue" picks it up), marked with the reason. Only a turn with no
+  text yet is rolled back (question + docs restored) — Mistral rejects empty
+  assistant messages anyway.
+- "New chat" aborts the in-flight turn; the `chatGen` counter stops that stale
+  turn's error handling from leaking into the new chat.
 
 **Corporate proxy** (main deployment risk; untested on the real network)
 - Bun `fetch` honors `HTTP(S)_PROXY` (re-read per request). No proxy config in
