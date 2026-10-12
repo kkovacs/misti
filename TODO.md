@@ -1,12 +1,12 @@
 - [ ] Progress bar for context
-- [ ] Animated thinking
+- [x] Animated thinking
 - [ ] xlsx reader?
 - [ ] codemode? (how?)
 - [ ] docx/xlsx writer?
 - [ ] Mistral OCR?
 - [ ] Rewrite to uv if that is proven to work on corp net?
 - [ ] charts inline? Simple html inline?
-- [ ] Remove streaming toggle if works well on corp net
+- [x] Remove streaming toggle if works well on corp net
 - [ ] Tools?
   - [ ] Ability to write out md/html files?
   - [ ] Web search? Exa, Sonar?

@@ -8,6 +8,7 @@ const PORT = 31599;
 const S = `http://127.0.0.1:${PORT}`;
 const KEY = "test-key-do-not-log";
 const SECRET = "SECRET-DOC-MARKER-7731"; // must never appear in server logs
+const REASONING = "REASONING-MARKER-4402"; // thinking text: must reach neither the browser nor the logs
 
 // --- mock Mistral --------------------------------------------------------------------------
 
@@ -34,8 +35,9 @@ const mock = Bun.serve({
     if (q.includes("LATE")) await Bun.sleep(2500); // no headers within REQUEST_TIMEOUT_MS
 
     let frames: string[] = [delta("Hello"), delta(" world"), ...END];
-    // Reasoning models stream typed chunks; thinking must be dropped.
-    if (q.includes("THINK")) frames = [delta([{ type: "thinking", thinking: [{ type: "text", text: "hmm" }] }]), delta([{ type: "text", text: "Answer" }]), ...END];
+    // Reasoning models stream typed chunks; the last thinking chunk shares a delta with the first text.
+    const think = (text: string, closed?: boolean) => ({ type: "thinking", thinking: [{ type: "text", text }], ...(closed ? { closed } : {}) });
+    if (q.includes("THINK")) frames = [delta([think(REASONING)]), delta([think("ok", true), { type: "text", text: "Ans" }]), delta("wer"), ...END];
     if (q.includes("TRUNCATE") || q.includes("IDLE")) frames = [delta("Hel")];
     // Trickle: total time > REQUEST_TIMEOUT_MS, every gap < STREAM_IDLE_TIMEOUT_MS.
     if (q.includes("SLOW")) frames = [...Array(8).fill(delta(".")), ...END];
@@ -176,10 +178,14 @@ describe("api", () => {
     expect((await post({ cacheKey: "my secret doc name.pdf" })).status).toBe(400);
   });
 
-  test("thinking chunks dropped", async () => {
+  test("thinking: sizes signalled, text dropped", async () => {
     const evs = await chat("THINK");
+    expect(evs.map((e) => e.type)).toEqual(["thinking", "thinking", "delta", "delta", "done"]);
+    expect(evs.filter((e) => e.type === "thinking")).toEqual([{ type: "thinking", n: REASONING.length }, { type: "thinking", n: 2 }]);
     expect(textOf(evs)).toBe("Answer");
-    expect(evs.at(-1)!.type).toBe("done");
+    expect(JSON.stringify(evs)).not.toContain(REASONING);
+    await Bun.sleep(50); // let stdout drain
+    expect(logs).toContain(`"thinkingChunks":2,"thinkingChars":${REASONING.length + 2}`);
   });
 
   test("slow but steady stream outlives REQUEST_TIMEOUT_MS", async () => {
@@ -298,6 +304,7 @@ describe("logging (runs last)", () => {
     }
     expect(logs).not.toContain(KEY);
     expect(logs).not.toContain(SECRET);
+    expect(logs).not.toContain(REASONING);
     expect(logs).not.toContain("secret-name");
     expect(logs).not.toContain("Hello world");
     expect(logs).not.toContain("blocked by proxy");

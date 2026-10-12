@@ -152,7 +152,10 @@ function textOf(content: unknown): string {
 }
 
 // One streaming call to /v1/chat/completions. No buffered fallback, no retry: SSE works, and retries cost money.
-async function chatCall(id: string, messages: Msg[], cacheKey: string | undefined, outer: AbortSignal, onDelta: (s: string) => void): Promise<Outcome> {
+async function chatCall(
+  id: string, messages: Msg[], cacheKey: string | undefined, outer: AbortSignal,
+  onDelta: (s: string) => void, onThinking: (chars: number) => void,
+): Promise<Outcome> {
   const timers = new AbortController();
   const signal = AbortSignal.any([outer, timers.signal]);
   // Deadline covers only the wait for headers (connect, proxy, TLS); generation itself is never timed.
@@ -189,6 +192,8 @@ async function chatCall(id: string, messages: Msg[], cacheKey: string | undefine
     let buf = "", content = "", finishReason: string | undefined, usage: Usage | undefined;
     let chunks = 0, bytes = 0, maxGap = 0, ttfb = -1, sawDone = false, badLines = 0;
     let last = performance.now();
+    // Reasoning chunks: measured and signalled (UI liveness), their text is dropped.
+    let thinkingChunks = 0, thinkingChars = 0, thinkFirst = 0, thinkLast = 0;
     while (!sawDone) {
       let r: ReadableStreamReadResult<Uint8Array>;
       try {
@@ -222,6 +227,16 @@ async function chatCall(id: string, messages: Msg[], cacheKey: string | undefine
         try {
           const j = JSON.parse(payload);
           const c = j.choices?.[0];
+          const parts = c?.delta?.content;
+          const thinking = Array.isArray(parts) ? parts.filter((p: any) => p?.type === "thinking") : [];
+          if (thinking.length) {
+            // A chunk carries a variable number of tokens (1 to ~4 seen), so report its size in chars.
+            const n = textOf(thinking.flatMap((p: any) => p.thinking ?? [])).length;
+            thinkLast = performance.now();
+            if (!thinkingChunks++) thinkFirst = thinkLast;
+            thinkingChars += n;
+            onThinking(n);
+          }
           const delta = textOf(c?.delta?.content);
           if (delta) {
             content += delta;
@@ -236,7 +251,7 @@ async function chatCall(id: string, messages: Msg[], cacheKey: string | undefine
     }
     log(id, "mistral.stream_end", {
       ms: Math.round(performance.now() - t0), ttfbMs: ttfb, chunks, bytes, maxGapMs: Math.round(maxGap),
-      sawDone, badLines, finishReason, usage,
+      sawDone, badLines, finishReason, usage, thinkingChunks, thinkingChars, thinkingMs: Math.round(thinkLast - thinkFirst),
     });
     if (!sawDone) throw new ChatError("truncated", "stream ended without [DONE]");
     return { content, finishReason, usage };
@@ -326,7 +341,7 @@ async function handleChat(id: string, req: Request): Promise<Response> {
   const ctl = new AbortController();
   req.signal.addEventListener("abort", () => ctl.abort(new ChatError("aborted", "client disconnected")));
 
-  // NDJSON to the browser: delta / done / error. Localhost hop, so it always streams.
+  // NDJSON to the browser: thinking / delta / done / error. Localhost hop, so it always streams.
   const enc = new TextEncoder();
   const body = new ReadableStream({
     async start(controller) {
@@ -336,9 +351,10 @@ async function handleChat(id: string, req: Request): Promise<Response> {
         } catch {} // browser already gone
       };
       const onDelta = (text: string) => send({ type: "delta", text });
+      const onThinking = (n: number) => send({ type: "thinking", n }); // size only: reasoning text never leaves the server
       const t0 = performance.now();
       try {
-        const out = await chatCall(id, messages, cacheKey, ctl.signal, onDelta);
+        const out = await chatCall(id, messages, cacheKey, ctl.signal, onDelta, onThinking);
         const cost = out.usage ? addUsage(out.usage) : 0;
         if (!out.usage) log(id, "chat.no_usage");
         send({ type: "done", finishReason: out.finishReason, usage: out.usage, costUsd: cost, totalUsd: totals.usd, fx });

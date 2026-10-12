@@ -40,7 +40,8 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 - `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` /
   `money.js` are deliberate tiny helpers (no dependency), CommonJS-exported for
   bun tests.
-- Always SSE to Mistral, NDJSON to the browser (`delta` / `done` / `error`).
+- Always SSE to Mistral, NDJSON to the browser (`thinking` / `delta` / `done` /
+  `error`).
   Buffered mode and the buffered fallback retry were removed on purpose: SSE
   works, and every retry was a second bill.
 
@@ -71,6 +72,16 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   may be an **array of typed chunks**; keep only `type: "text"` (`textOf()`).
   Reasoning tokens are billed inside `completion_tokens` and are large
   (hundreds for "say hi").
+- Reasoning **streams live**: `{type: "thinking", thinking: [text chunks]}`
+  parts from ~50 ms after the headers; the last one has `closed: true` and
+  shares a delta with the first answer text. A chunk carries 1 to ~4 tokens, so
+  chunk count != token count; ~3 chars/token measured (`CHARS_PER_TOKEN`, `XXX`).
+  The server forwards only the **size** (`{type: "thinking", n: chars}`), never
+  the text; the browser drives the thinking spinner from it (flywheel: each
+  token kicks it, friction slows it, so speed = token rate and a stall spins it
+  down) and freezes it into "thought for 0:14 · ~320 tokens", also on a
+  stopped/rolled-back turn (that reasoning was billed). Logs: `thinkingChunks`,
+  `thinkingChars`, `thinkingMs` in `mistral.stream_end`.
 - `mistral-large-4` has vision. Tiny images (16x16) are **silently ignored**
   (no error, no tokens); `img.js` upscales below a minimum (empirical, `XXX`).
 - **Prompt caching** (verified on `mistral-large-4`, differs from the docs):
@@ -99,17 +110,18 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 **Streaming / timeouts** (rule: never time out a call that is generating)
 - `REQUEST_TIMEOUT_MS` covers only the wait for response headers (connect,
   proxy, TLS). Generation itself is never timed — long answers (translations)
-  used to die at a whole-request deadline. Assumes Mistral sends SSE headers
-  before reasoning starts (unverified on the real network: compare
-  `mistral.headers` ms vs `mistral.stream_end` ttfbMs).
+  used to die at a whole-request deadline. Mistral sends SSE headers before
+  reasoning starts (verified direct: headers ~0.6 s, reasoning 14 s; still
+  unverified behind the corporate proxy: compare `mistral.headers` ms vs
+  `mistral.stream_end` ttfbMs).
 - The idle watchdog (`STREAM_IDLE_TIMEOUT_MS`) is a generous last resort for a
-  silently dead connection, not a liveness check: long reasoning or a buffering
-  proxy can be silent a long time. The user's Stop button is the real watchdog.
+  silently dead connection, not a liveness check: a buffering proxy can be
+  silent a long time (direct, thinking chunks keep the stream busy). The user's Stop button is the real watchdog.
 - No retries at all: every failure is a visible error. Don't add any back.
 - **Stop reading at `[DONE]`.** A proxy holding the connection open afterwards
   would otherwise trip the idle watchdog.
-- `Bun.serve({ idleTimeout: 0 })` is deliberate: the browser gets no bytes
-  while the model reasons, which can take minutes.
+- `Bun.serve({ idleTimeout: 0 })` is deliberate: behind a buffering proxy the
+  browser gets no bytes while the model reasons, which can take minutes.
 - A non-JSON error response (HTML) is treated as "proxy / not Mistral".
 - Browser-side, Stop/error: streamed text **stays** in history (it was paid
   for; "continue" picks it up), marked with the reason. Only a turn with no
@@ -139,13 +151,19 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   --allow-private-network`). Its default `page-1` target has no page: connect
   to `ws://127.0.0.1:9222/devtools/browser`, `Target.createTarget`, then
   `Target.attachToTarget {flatten: true}` and send with `sessionId`.
-  `upload()`, `pending`, `history`, `renderMarkdown()` are page globals, handy
-  for staging UI states without API calls. `Page.captureScreenshot` works
+  `upload()`, `pending`, `history`, `renderMarkdown()`, `userBubble()`,
+  `assistantBubble()` (its `.think.tick(n)` / `.think.stop()`) are page
+  globals, handy for staging UI states without API calls. `Page.captureScreenshot` works
   (1280x720 default; `Emulation.setDeviceMetricsOverride` for other sizes).
 - obscura gaps: ignores `Emulation.setEmulatedMedia` (dark mode — inject the
   dark tokens instead), no `DataTransfer`, canvas can't decode/encode images
   (`createImageBitmap` -> 0x0, `toDataURL` -> `"data:,"`), and `transform` on
   pseudo-elements. Image shrinking must be checked in a real browser.
+  `fetch` delivers a streamed body in **one read at the end**, so live
+  streaming (spinner, deltas) can't be observed there — stage it with the
+  globals above.
+- Server tests own port 31599: a manual `MISTI_PORT=31599` server (real key)
+  would answer the tests instead, and send their prompts to real Mistral.
 - Don't `pkill -f "bun server.ts"` from a shell whose command line contains
   that string — it kills itself.
 

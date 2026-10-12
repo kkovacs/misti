@@ -114,12 +114,63 @@ function userBubble(question, docs) {
   return add(b);
 }
 
+// Thinking indicator: a flywheel spinner, each reasoning token kicks it, friction slows it,
+// so rotation speed follows thinking speed and a stall (e.g. buffering proxy) spins it down.
+// Token count is estimated from reasoning chars (the server sends sizes, not text).
+// XXX KICK/TAU/MAX_V tuned by eye (~23 tok/s on mistral-large-4 -> ~1 turn/s); CHARS_PER_TOKEN from 2 samples.
+const CHARS_PER_TOKEN = 3; // measured ~2.7-3.1 on short reasoning
+const KICK = 30; // deg/s added per token
+const TAU = 0.5; // s, friction time constant
+const MAX_V = 1080; // deg/s cap, so bursts don't blur
+function thinker(row) {
+  const spin = row.appendChild(el("span", "spin"));
+  const label = row.appendChild(el("span"));
+  const t0 = performance.now();
+  let chars = 0, v = 0, angle = 0, prev = t0, raf = 0, stopped = false;
+  const clock = (now) => {
+    const s = Math.floor((now - t0) / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+  const tokens = () => Math.round(chars / CHARS_PER_TOKEN).toLocaleString();
+  const frame = (now) => {
+    const dt = (now - prev) / 1000;
+    prev = now;
+    v *= Math.exp(-dt / TAU);
+    angle = (angle + v * dt) % 360;
+    spin.style.transform = `rotate(${angle}deg)`;
+    label.textContent = `Thinking · ~${tokens()} tokens · ${clock(now)}`;
+    raf = requestAnimationFrame(frame);
+  };
+  return {
+    tick(n) {
+      if (stopped) return;
+      chars += n;
+      v = Math.min(v + (KICK * n) / CHARS_PER_TOKEN, MAX_V);
+      if (!raf) {
+        row.hidden = false;
+        raf = requestAnimationFrame(frame);
+      }
+    },
+    // Freeze into a static line; no-op if the model never thought.
+    stop(suffix = "") {
+      if (stopped || !raf) return;
+      stopped = true;
+      cancelAnimationFrame(raf);
+      spin.remove();
+      label.textContent = `thought for ${clock(performance.now())} · ~${tokens()} tokens${suffix}`;
+    },
+  };
+}
+
 function assistantBubble() {
   const b = el("div", "msg assistant");
+  const thinkRow = b.appendChild(el("div", "think"));
+  thinkRow.hidden = true;
+  const think = thinker(thinkRow);
   const text = b.appendChild(el("div", "md"));
   const meta = b.appendChild(el("div", "meta"));
   add(b);
-  return { b, text, meta };
+  return { b, think, text, meta };
 }
 
 async function send(question) {
@@ -129,7 +180,7 @@ async function send(question) {
   renderPending();
   userBubble(question, docs);
   const ui = assistantBubble();
-  ui.meta.textContent = "thinking...";
+  ui.meta.textContent = "waiting for Mistral...";
 
   const gen = chatGen;
   busy = new AbortController();
@@ -149,7 +200,7 @@ async function send(question) {
       const data = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
       throw new Error(data.message);
     }
-    // NDJSON events: delta / done / error.
+    // NDJSON events: thinking / delta / done / error.
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -161,7 +212,11 @@ async function send(question) {
       while ((nl = buf.indexOf("\n")) >= 0) {
         const ev = JSON.parse(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
-        if (ev.type === "delta") {
+        if (ev.type === "thinking") {
+          ui.meta.textContent = "";
+          ui.think.tick(ev.n);
+        } else if (ev.type === "delta") {
+          ui.think.stop();
           answer += ev.text;
           ui.text.innerHTML = renderMarkdown(answer); // md.js escapes everything
           ui.meta.textContent = "";
@@ -175,6 +230,7 @@ async function send(question) {
   } catch (err) {
     if (gen !== chatGen) return; // aborted by "New chat": nothing to roll back into
     cut = err.name === "AbortError" ? "stopped" : err.message;
+    ui.think.stop(cut === "stopped" ? " (stopped)" : " (failed)"); // reasoning was billed even if no answer came
     if (!answer) {
       // Nothing arrived: roll back the turn so the user can simply retry (question + docs restored).
       history.pop();
@@ -188,6 +244,7 @@ async function send(question) {
     }
     // Partial answer: paid for, so it stays in history and "continue" can pick it up.
   } finally {
+    ui.think.stop();
     busy = null;
     setBusy(false);
   }
