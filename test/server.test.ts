@@ -38,6 +38,8 @@ const mock = Bun.serve({
     // Reasoning models stream typed chunks; the last thinking chunk shares a delta with the first text.
     const think = (text: string, closed?: boolean) => ({ type: "thinking", thinking: [{ type: "text", text }], ...(closed ? { closed } : {}) });
     if (q.includes("THINK")) frames = [delta([think(REASONING)]), delta([think("ok", true), { type: "text", text: "Ans" }]), delta("wer"), ...END];
+    // Output limit hit while still reasoning: a normal end, but no text at all.
+    if (q.includes("REASONLIMIT")) frames = [delta([think("hmm")]), sse({ choices: [{ delta: {}, finish_reason: "length" }], usage }), "data: [DONE]\n\n"];
     if (q.includes("TRUNCATE") || q.includes("IDLE")) frames = [delta("Hel")];
     // Trickle: total time > REQUEST_TIMEOUT_MS, every gap < STREAM_IDLE_TIMEOUT_MS.
     if (q.includes("SLOW")) frames = [...Array(8).fill(delta(".")), ...END];
@@ -253,6 +255,13 @@ describe("api", () => {
     expect(u.usd).toBeCloseTo(6 * one, 10);
     expect(u.priceSource).toBe("fallback constants");
     expect(u.fx.source).toBe("hardwired");
+  });
+
+  // After the usage test: this call is billed too and would shift its totals.
+  test("output limit during reasoning -> done with length and no deltas (browser rolls back)", async () => {
+    const evs = await chat("REASONLIMIT");
+    expect(evs.map((e) => e.type)).toEqual(["thinking", "done"]);
+    expect(evs.at(-1)).toMatchObject({ finishReason: "length", usage: { completion_tokens: expect.any(Number) } });
   });
 });
 

@@ -227,6 +227,11 @@ async function send(question) {
     }
     if (error) throw new Error(error.message);
     if (!done) throw new Error("connection to local server ended unexpectedly");
+    // Empty answer (e.g. output limit hit while reasoning): Mistral rejects empty assistant turns, so roll back.
+    if (!answer) {
+      money($("#cost"), done.totalUsd, done.fx); // billed anyway
+      throw new Error(done.finishReason === "length" ? "no answer: reasoning hit the output limit" : `no answer (finish: ${done.finishReason})`);
+    }
   } catch (err) {
     if (gen !== chatGen) return; // aborted by "New chat": nothing to roll back into
     cut = err.name === "AbortError" ? "stopped" : err.message;

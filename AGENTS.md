@@ -105,7 +105,12 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   billed but not counted. Accepted; the counter is an estimate.
 - Output limit hit -> a normal end with `finish_reason: "length"` (answer kept,
   UI says "type 'continue'"). A huge doc never translates in one answer, and
-  every "continue" re-sends doc + all output so far.
+  every "continue" re-sends doc + all output so far. We send no `max_tokens`:
+  limits are the model's (`mistral-large-4`: 1,048,576 context per
+  `/v1/models`; 262,144 output per models.dev), so `MAX_DOC_CHARS` keeps input
+  far below the context window. If the limit hits **while still reasoning**,
+  `done` arrives with no text: the browser rolls the turn back (an empty
+  assistant message would break every later turn) but still shows the cost.
 
 **Streaming / timeouts** (rule: never time out a call that is generating)
 - `REQUEST_TIMEOUT_MS` covers only the wait for response headers (connect,
@@ -126,7 +131,7 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
 - Browser-side, Stop/error: streamed text **stays** in history (it was paid
   for; "continue" picks it up), marked with the reason. Only a turn with no
   text yet is rolled back (question + docs restored) — Mistral rejects empty
-  assistant messages anyway.
+  assistant messages anyway. Same for a `done` with no text (see output limit).
 - "New chat" aborts the in-flight turn; the `chatGen` counter stops that stale
   turn's error handling from leaking into the new chat.
 
