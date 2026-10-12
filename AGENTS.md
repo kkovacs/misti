@@ -34,8 +34,10 @@ Config: `.env` (see `.env.example`); defaults and constants live in `server.ts`.
   layer = scanned PDF -> explicit error. Corrupt files throw (fail fast, accepted).
 - **Images** never touch the server's extractor: the browser shrinks them
   (`img.js`, canvas -> JPEG data URL) and the user turn becomes
-  `[text, image_url...]` parts; turns without images stay plain strings.
-  Images are re-sent (and billed) every turn, hence the shrink and the
+  `[text, (label, image_url)...]` parts; turns without images stay plain strings.
+  Each image is preceded by a text label `<image n="1" name="...">` (mirrors
+  `<document name>`; numbered per turn, since pasted screenshots are all
+  `image.png`) so the user can refer to "image 2". Images are re-sent (and billed) every turn, hence the shrink and the
   per-conversation image cap.
 - `public/`: vanilla JS, no framework, no build step. `md.js` / `img.js` /
   `money.js` are deliberate tiny helpers (no dependency), CommonJS-exported for

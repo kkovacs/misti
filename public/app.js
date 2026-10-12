@@ -91,14 +91,22 @@ async function upload(files) {
 }
 
 // Docs go into the user turn once; later turns resend them as part of history (cache-friendly prefix).
-const docBlock = (d) => `<document name="${d.name.replace(/"/g, "'")}">\n${d.text}\n</document>\n\n`;
+const attr = (s) => s.replace(/"/g, "'");
+const docBlock = (d) => `<document name="${attr(d.name)}">\n${d.text}\n</document>\n\n`;
 
 // Plain string without images (as before); with images, text + image_url parts.
+// Each image gets a label so it can be referred to; numbered, as pasted screenshots are all "image.png".
 function userContent(question, items) {
   const text = items.filter((d) => d.kind !== "image").map(docBlock).join("") + question;
   const images = items.filter((d) => d.kind === "image");
   if (!images.length) return text;
-  return [{ type: "text", text }, ...images.map((d) => ({ type: "image_url", image_url: d.url }))];
+  return [
+    { type: "text", text },
+    ...images.flatMap((d, i) => [
+      { type: "text", text: `<image n="${i + 1}" name="${attr(d.name)}">` },
+      { type: "image_url", image_url: d.url },
+    ]),
+  ];
 }
 
 // --- chat ----------------------------------------------------------------------------------
