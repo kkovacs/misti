@@ -426,7 +426,7 @@ async function handleHealth(id: string): Promise<Response> {
 
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((h) => `http://${h}`));
-const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js", "/img.js": "img.js", "/money.js": "money.js" };
+const STATIC: Record<string, string> = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/md.js": "md.js", "/img.js": "img.js", "/money.js": "money.js", "/favicon.svg": "favicon.svg" };
 
 async function route(id: string, req: Request, path: string): Promise<Response> {
   // Drive-by protection: DNS rebinding (Host) and cross-site POSTs (Origin; curl sends none).
