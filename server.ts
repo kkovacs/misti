@@ -17,11 +17,16 @@ const MAX_DOC_CHARS = Number(process.env.MAX_DOC_CHARS ?? 400_000);
 const MAX_IMAGES = 16; // per conversation: every image is re-sent (and billed) on every turn
 const HEALTH_TIMEOUT_MS = 15_000;
 
-const SYSTEM_PROMPT =
+// System prompt: default for everyone; set SYSTEM_PROMPT in .env to replace it entirely.
+// Env values may use \\n escapes; real newlines work too. Never logged (contains user-facing wording only).
+const DEFAULT_SYSTEM_PROMPT =
   "You are Misti, a helpful, precise auditor assistant. The user may attach documents; they appear inside " +
   "<document> tags. When answering about attached documents, base your answer on them and say so " +
   "when they do not contain the answer. Answer in the language of the user's question. " +
   "Format answers in Markdown.";
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT
+  ? process.env.SYSTEM_PROMPT.replace(/\\n/g, "\n").trim()
+  : DEFAULT_SYSTEM_PROMPT;
 
 if (!KEY) {
   console.error("MISTRAL_API_KEY is not set (put it in .env next to server.ts and start from that directory).");

@@ -161,6 +161,7 @@ describe("api", () => {
     const last = seen.at(-1)!;
     expect(last.auth).toBe(`Bearer ${KEY}`);
     expect(last.body.messages[0].role).toBe("system");
+    expect(last.body.messages[0].content).toContain("auditor assistant"); // default (SYSTEM_PROMPT unset)
     expect(last.body.model).toBe("mistral-large-4");
     expect(last.body.stream).toBe(true);
   });
