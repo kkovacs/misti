@@ -1,108 +1,111 @@
-# MISTI — helyi, ZDR-kompatibilis AI chat
+# MISTI — local, ZDR-compliant AI chat
 
-Böngészőből használható, a saját gépen futó chatfelület a Mistral EU-s API-jához.
-Általános chatre és dokumentumok (.docx, .pdf) valamint képek elemzésére való,
-**Zero Data Retention (ZDR)** mellett: a Mistral nem tárolja és nem naplózza
-sem a kérdéseket, sem a válaszokat.
+A chat interface that runs on your own machine and is used from the browser,
+talking to Mistral's EU API. Meant for general chat and for analyzing documents
+(.docx, .pdf) and images, under **Zero Data Retention (ZDR)**: Mistral does not
+store or log either the questions or the answers.
 
-## 1. Futtatás
+## 1. Running it
 
-**Előfeltételek**
+**Prerequisites**
 
 - [Bun](https://bun.sh)
-- Mistral API-kulcs olyan fiókhoz, amelyen a Mistral **jóváhagyta a ZDR-t**
-  (jóváhagyás után az Admin felület adatvédelmi beállításainál látszik;
-  igényelni a Mistral supportnál kell).
+- A Mistral API key for an account on which Mistral has **approved ZDR**
+  (after approval it appears in the privacy settings of the Admin console;
+  you must request it from Mistral support).
 
-**Indítás**
+**Starting it**
 
 ```sh
-cp .env.example .env        # majd a .env-ben: MISTRAL_API_KEY=...
+cp .env.example .env        # then set MISTRAL_API_KEY=... in .env
 bun install
 bun server.ts
 ```
 
-Ezután böngészőben: <http://127.0.0.1:31571>
+Then open in the browser: <http://127.0.0.1:31571>
 
-- A szerver csak a saját gépről érhető el (`127.0.0.1`), más gépről nem.
-- Fájlok: húzd az ablakba, vagy „+ Attach”; képernyőkép: Ctrl+V.
-- „New chat” vagy oldalfrissítés = tiszta lap; a beszélgetés sehol nem marad meg.
-- A költség forintban látszik (becslés); fölé húzva az egeret a USD-összeg és
-  az árfolyam is megjelenik.
+- The server is reachable only from your own machine (`127.0.0.1`), not from
+  other machines.
+- Files: drag them into the window, or use "+ Attach"; screenshots: Ctrl+V.
+- "New chat" or a page refresh = a clean slate; the conversation is not kept
+  anywhere.
+- The cost is displayed in HUF (an estimate); hovering over it shows the USD
+  amount and the exchange rate too.
 
-**Céges hálózat, proxy**
+**Corporate network, proxy**
 
-- Proxy esetén: `HTTPS_PROXY=http://proxy.ceg:8080` a `.env`-ben.
-- Ha a cég TLS-forgalmat vizsgál (tanúsítványhiba az indítás után):
-  `NODE_EXTRA_CA_CERTS=C:\út\a\ceges-root-ca.pem`.
-- A **Healthcheck** gomb próbahívással ellenőrzi a kapcsolatot (pl. VPN-váltás után).
-- Hiba esetén a konzol részletes, de tartalommentes naplót ír — ezt kell
-  továbbítani hibabejelentéskor.
+- If there is a proxy: `HTTPS_PROXY=http://proxy.company:8080` in `.env`.
+- If your company inspects TLS traffic (certificate error at startup):
+  `NODE_EXTRA_CA_CERTS=C:\path\to\corporate-root-ca.pem`.
+- The **Healthcheck** button verifies the connection with a probe call
+  (e.g. after switching VPNs).
+- On error the console writes a detailed but content-free log — send that with
+  the bug report.
 
-Tesztek: `bun test` (hálózat és API-kulcs nélkül fut).
+Tests: `bun test` (runs without network and without an API key).
 
-## 2. Miért ez a legjobb megoldás ZDR és EU szempontból?
+## 2. Why is this the best option for ZDR and the EU?
 
-### Európai szolgáltató, közvetlenül
+### European provider, directly
 
-- A **Mistral AI francia, európai székhelyű cég**; a MISTI az EU-s végpontot
-  (`api.eu.mistral.ai`) hívja, közvetlenül, felhőszolgáltató-közvetítő nélkül.
-- Az amerikai szolgáltatók (OpenAI, Anthropic, Google) EU-s adatkezelést is
-  kínálnak, de amerikai anyavállalatként esetükben az EU-s adattárolás mellett is
-  felmerül az amerikai hatósági hozzáférés (pl. US CLOUD Act) kérdése, és az EU-s
-  feldolgozás gyakran további szereplőn (AWS, Google Cloud) keresztül valósul meg.
-  A Mistralnál egyetlen, európai szerződő fél van (az általa igénybe vett
-  alvállalkozókat a Mistral Trust Center listázza).
+- **Mistral AI is a French, Europe-headquartered company**; MISTI calls the EU
+  endpoint (`api.eu.mistral.ai`), directly, without a cloud-provider
+  intermediary.
+- The American providers (OpenAI, Anthropic, Google) also offer EU data
+  handling, but as US parent companies the question of US government access
+  (e.g. the US CLOUD Act) arises even with EU data storage, and the EU
+  processing is often implemented through yet another intermediary (AWS,
+  Google Cloud). With Mistral there is a single, European contracting party
+  (the subcontractors it uses are listed by the Mistral Trust Center).
 
-### ZDR: csak az arra jogosult végpontok
+### ZDR: only the endpoints it applies to
 
-A Mistral ZDR-je is **csak „állapotmentes” (stateless) API-hívásokra** vonatkozik;
-a tárolással járó funkciókra (Agents, Batch, Conversations, Libraries,
-`/v1/files`, a Le Chat termék) **nem**. A MISTI ezért szigorúan csak ezeket használja:
+Mistral's ZDR applies **only to "stateless" API calls**; features that involve
+storage (Agents, Batch, Conversations, Libraries, `/v1/files`, the Le Chat
+product) are **not** covered. MISTI therefore strictly uses only these:
 
-- `/v1/chat/completions` — a beszélgetés, és
-- `/v1/models` — kapcsolatellenőrzés.
+- `/v1/chat/completions` — the conversation, and
+- `/v1/models` — connection check.
 
-A dokumentumokat **sosem tölti fel** a Mistralhoz fájlként: a szöveget a saját
-gépen nyeri ki, és csak a szöveg megy a kérésben. A képek is a kérésen belül
-(beágyazva) utaznak, nem külön tárolt fájlként.
+Documents are **never uploaded** to Mistral as files: the text is extracted on
+your own machine, and only the text goes in the request. Images also travel
+inside the request (embedded), not as separately stored files.
 
-### Semmi nem marad meg — nálunk sem
+### Nothing is kept — not here either
 
-- A szerver **nem ír lemezre** dokumentumot, és nem tárol beszélgetést; az
-  előzmények csak a böngészőfül memóriájában élnek.
-- A napló **soha** nem tartalmaz API-kulcsot, dokumentumszöveget, fájlnevet,
-  kérdést, választ vagy képet — csak méreteket, időket, hibakódokat. Ezt
-  automatikus teszt ellenőrzi.
-- Csak a helyi gépről érhető el, és véd a böngészőn keresztüli visszaélések ellen
-  (idegen weboldal nem tudja a nevünkben hívni).
+- The server **never writes documents to disk**, and stores no conversation;
+  the history lives only in the browser tab's memory.
+- The log **never** contains the API key, document text, filenames, questions,
+  answers or images — only sizes, times, error codes. An automated test
+  verifies this.
+- It is accessible only from the local machine, and is protected against
+  abuse via the browser (a foreign website cannot call it in your name).
 
-### Fogyasztói szinten nincs ZDR más módon
+### No ZDR at consumer level in any other way
 
-A népszerű chatalkalmazások (ChatGPT, Claude.ai, Gemini, sőt a Mistral saját
-Le Chat-je) fogyasztói formában **nem kínálnak ZDR-t**; ZDR mindenhol csak
-API-szinten, külön jóváhagyással érhető el. Fejlesztői API-t viszont munkatárs
-nem tud kényelmesen használni. **A MISTI pontosan ezt a rést tölti be:**
-megszokott chatfelület, a ZDR-es API fölött.
+Popular chat apps (ChatGPT, Claude.ai, Gemini, and even Mistral's own Le Chat)
+**do not offer ZDR** in their consumer form; ZDR is available everywhere only
+at the API level, with separate approval. But a developer API is not something
+colleagues can conveniently use. **MISTI fills exactly this gap:** a familiar
+chat interface on top of the ZDR API.
 
-### Átláthatóság: mi megy még ki a gépről?
+### Transparency: what else leaves the machine?
 
-Indításkor két **tartalommentes** lekérdezés: a modell árai
-([models.dev](https://models.dev)) és az USD/HUF árfolyam (EKB, a
-[frankfurter.dev](https://frankfurter.dev) szolgáltatáson át). Ezek semmilyen
-felhasználói adatot nem tartalmaznak; ha nem elérhetők, beépített értékekkel
-fut tovább.
+At startup two **content-free** requests: the model prices
+([models.dev](https://models.dev)) and the USD/HUF exchange rate (ECB, via the
+[frankfurter.dev](https://frankfurter.dev) service). Neither contains any user
+data; if they are unreachable, built-in values are used instead.
 
-### Korlátok
+### Limitations
 
-- A ZDR a **Mistral-fiók beállítása**, nem a MISTI-é: jóváhagyott ZDR nélkül a
-  Mistral (a szolgáltatás alapbeállításai szerint) visszaélés-figyelés céljából
-  ideiglenesen megőrizheti a kéréseket. ZDR-el még erre sem tárolja őket.
-- A rövid ideig (pár perc) tartó prompt-gyorsítótár (cache) a Mistral oldalán a
-  feldolgozás része; a részletekről a Mistral Trust Center ad tájékoztatást.
-- A szkennelt (szövegréteg nélküli) PDF-eket a mostani verzió nem kezeli.
+- ZDR is a **setting of the Mistral account**, not of MISTI: without approved
+  ZDR, Mistral (per the service's default settings) may temporarily retain
+  requests for abuse monitoring. With ZDR it does not store even that.
+- The short-lived (a few minutes) prompt cache on Mistral's side is part of
+  the processing; the Mistral Trust Center provides details about it.
+- Scanned PDFs (without a text layer) are not handled by the current version.
 
-## Források
+## Sources
 
 - Mistral — Zero data retention:
   <https://docs.mistral.ai/admin/monitor-comply/zero-data-retention>
